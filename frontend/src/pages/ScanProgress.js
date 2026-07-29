@@ -25,7 +25,12 @@ export default function ScanProgress() {
       setScan(res.data);
       return res.data;
     } catch (err) {
-      setError(apiError(err, "Could not load this scan"));
+      // Only surface a hard error if we have never managed to load this scan.
+      // A transient poll failure must not latch the error state or stop polling.
+      setScan((current) => {
+        if (!current) setError(apiError(err, "Could not load this scan"));
+        return current;
+      });
       return null;
     }
   }, [scanId]);
@@ -35,7 +40,12 @@ export default function ScanProgress() {
     const tick = async () => {
       const data = await load();
       if (stop) return;
-      if (data && TERMINAL.includes(data.status)) {
+      if (data === null) {
+        // transient failure - back off briefly and keep polling
+        timer.current = window.setTimeout(tick, 3000);
+        return;
+      }
+      if (TERMINAL.includes(data.status)) {
         if (data.status === "completed") {
           window.setTimeout(() => navigate(`/scan/${scanId}`), 900);
         }

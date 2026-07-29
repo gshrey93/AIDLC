@@ -121,8 +121,15 @@ export function relativeDays(iso) {
   return `${days} days ago`;
 }
 
-export const GITHUB_RE = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/?$/;
-export const BITBUCKET_RE = /^https:\/\/bitbucket\.org\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/?$/;
+/* These must stay in step with GITHUB_URL_RE / BITBUCKET_URL_RE in backend/core/importer.py.
+   A URL copied straight from the browser usually carries extra path segments, for example
+   https://bitbucket.org/team/repo/src/main/ or https://github.com/owner/repo/tree/develop, and a
+   trailing .git or query string is common too. The backend accepts all of those and reads the
+   branch from them, so the client must not reject them first. */
+export const GITHUB_RE =
+  /^https?:\/\/(?:www\.)?github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?(?:\.git)?(?:\/(?:tree|blob)\/[^/?#]+)?\/?(?:[?#].*)?$/;
+export const BITBUCKET_RE =
+  /^https?:\/\/(?:www\.)?bitbucket\.org\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?(?:\.git)?(?:\/(?:src|branch)\/[^/?#]+)?\/?(?:[?#].*)?$/;
 
 export const ERROR_HELP = {
   GitHubRepoUnavailable:

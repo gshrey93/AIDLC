@@ -168,8 +168,8 @@ async def config_info():
     return {
         "max_archive_mb": MAX_ARCHIVE_BYTES // (1024 * 1024),
         "max_files": MAX_FILES,
-        "github_url_pattern": "^https://github\\.com/[^/]+/[^/]+/?$",
-        "bitbucket_url_pattern": "^https://bitbucket\\.org/[^/]+/[^/]+/?$",
+        "github_url_pattern": "^https?://(www\\.)?github\\.com/[^/]+/[^/]+(\\.git)?(/(tree|blob)/[^/?#]+)?/?$",
+        "bitbucket_url_pattern": "^https?://(www\\.)?bitbucket\\.org/[^/]+/[^/]+(\\.git)?(/(src|branch)/[^/?#]+)?/?$",
         "github_url_hint": GITHUB_URL_HINT,
         "inventory_groups": INVENTORY_GROUPS,
         "retention": {
@@ -755,6 +755,14 @@ async def _run_seed(force: bool = False):
 
 
 app.include_router(api)
+
+
+# Kubernetes/container liveness and readiness probes call these without the /api prefix.
+# They must stay outside the API router or the deployment health check fails with 404.
+@app.get("/health")
+@app.get("/healthz")
+async def container_health():
+    return {"status": "ok"}
 
 
 @app.exception_handler(404)

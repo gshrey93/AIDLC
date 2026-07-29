@@ -1,2 +1,0 @@
-# AIDLC
-AI DLC

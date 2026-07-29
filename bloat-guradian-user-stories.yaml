@@ -1,0 +1,332 @@
+# Bloat Guardian - User Stories
+# Format: Epic > Story > Acceptance Criteria (Given/When/Then) + Definition of Done
+# Version: 1.0
+
+meta:
+  product: Bloat Guardian
+  version: "1.0"
+  user_role: "Single User (Product Owner / TPM / Individual Builder)"
+  description: >
+    Web app to analyze agentic coding repositories for waste (token bloat,
+    duplicated instructions, oversized context, review inefficiency) and return
+    a quantified efficiency verdict with actionable savings recommendations.
+
+global_definition_of_done:
+  - Code reviewed and merged to main
+  - Unit and integration tests written and passing
+  - Responsive UI verified on desktop and tablet
+  - Error and empty states handled with user-friendly messaging
+  - Accessibility: keyboard navigable, ARIA labels on interactive elements
+  - No console errors or unhandled promise rejections
+  - Feature validated against acceptance criteria by QA
+
+epics:
+
+  - id: EPIC-1
+    title: Repository Intake
+    stories:
+
+      - id: US-1.1
+        title: Import a public GitHub repository
+        story: >
+          As a user, I want to import a public GitHub repository by URL
+          so that I can analyze it for agentic inefficiencies.
+        acceptance_criteria:
+          - Given a valid GitHub URL matching https://github.com/{owner}/{repo}
+            When I submit it with the rights checkbox checked
+            Then the scan starts and enters the Importing stage
+          - Given an invalid or unreachable GitHub URL
+            When I submit it
+            Then a GitHubRepoUnavailable error is shown with a zip-upload fallback
+          - Given a non-existent branch
+            When I submit it
+            Then a BranchNotFound error is shown
+          - Given an archive exceeding 250 MB
+            When import runs
+            Then a RepoTooLarge error is shown
+          - Given GitHub rate limiting
+            When import runs
+            Then a GitHubRateLimited message advises retry later
+        definition_of_done:
+          - Live URL format validation on input
+          - All four error codes mapped to distinct UI messages
+          - Zip-upload fallback offered on any failure
+
+      - id: US-1.2
+        title: Import a public Bitbucket repository
+        story: >
+          As a user, I want to import a public Bitbucket repository by URL
+          so that I can analyze Bitbucket-hosted repos too.
+        acceptance_criteria:
+          - Given a valid Bitbucket URL matching https://bitbucket.org/{workspace}/{repo}
+            When I submit it with the rights checkbox checked
+            Then the scan starts and enters the Importing stage
+          - Given an invalid or unreachable Bitbucket URL
+            When I submit it
+            Then a BitbucketRepoUnavailable error is shown with a zip-upload fallback
+          - Given a non-existent branch
+            When I submit it
+            Then a BranchNotFound error is shown
+          - Given an archive exceeding 250 MB
+            When import runs
+            Then a RepoTooLarge error is shown
+          - Given Bitbucket rate limiting
+            When import runs
+            Then a BitbucketRateLimited message advises retry later
+        definition_of_done:
+          - Bitbucket URL pattern validation on input
+          - source_type persisted as "bitbucket"
+          - Error handling parity with GitHub import
+
+      - id: US-1.3
+        title: Upload a repository zip
+        story: >
+          As a user, I want to upload a .zip export of a repo
+          so that I can analyze private or local repos without connecting an account.
+        acceptance_criteria:
+          - Given a .zip file <= 250 MB
+            When I upload it with the rights checkbox checked
+            Then the scan starts
+          - Given a corrupted zip
+            When extraction runs
+            Then a ZipCorrupted error is shown and settings are preserved for re-upload
+          - Given a zip > 250 MB
+            When I upload it
+            Then a ZipTooLarge error is shown
+        definition_of_done:
+          - File type and size validated client-side before upload
+          - Scan settings retained on re-upload after failure
+
+      - id: US-1.4
+        title: Upload individual .md files
+        story: >
+          As a user, I want to upload .md files directly
+          so that I can quickly analyze standalone agent/instruction files.
+        acceptance_criteria:
+          - Given one or more valid .md files
+            When I upload them with the rights checkbox checked
+            Then the scan starts
+          - Given fewer than 5 parsed text files result
+            When the scan completes parsing
+            Then status is InsufficientData and no savings are calculated
+
+      - id: US-1.5
+        title: Confirm rights before scanning
+        story: >
+          As a user, I must confirm I have rights to analyze the content
+          so that the product enforces responsible use.
+        acceptance_criteria:
+          - Given the New Scan page
+            When the rights acknowledgment checkbox is unchecked
+            Then the Start button is disabled
+          - Given valid input and a checked checkbox
+            When I click Start
+            Then the scan begins
+
+  - id: EPIC-2
+    title: Parsing & Scanning
+    stories:
+
+      - id: US-2.1
+        title: Parse and classify repository files
+        story: >
+          As a user, I want the repo parsed and files classified by category
+          so that I can see an accurate inventory of what was analyzed.
+        acceptance_criteria:
+          - Given a successfully imported repo
+            When parsing runs
+            Then files are grouped into agents, skills, context/memory,
+            orchestration, source, diagrams, other, and docs
+          - Given a single file > 5 MB
+            When parsing runs
+            Then content is not parsed and it is marked SkippedOversized with metadata retained
+          - Given an unsupported extension
+            When parsing runs
+            Then the file is marked SkippedUnsupported
+          - Given archive extraction fails
+            When parsing runs
+            Then the scan stops with ImportFailed
+        definition_of_done:
+          - Token estimate uses ceil(character_count / 4)
+          - File inventory reflects correct parse_status for each file
+
+      - id: US-2.2
+        title: Run the adversary scan across 5 categories
+        story: >
+          As a user, I want a heuristic scan across all 5 waste categories
+          so that I get a complete efficiency picture.
+        acceptance_criteria:
+          - Given a valid scan (>= 5 parsed text files)
+            When the adversary scan runs
+            Then issues are produced with severity, evidence, impacted files,
+            estimated token waste, and estimated credit waste
+          - Given near-duplicate agent/context files with similarity >= 0.80
+            When scoring runs
+            Then a -5 penalty per pair is applied, capped at 32 per scan
+          - Given a context/memory file over 8,000 tokens
+            When scoring runs
+            Then a -6 penalty per file is applied, capped at 24 per scan
+        definition_of_done:
+          - All penalty rules and caps implemented per spec Section 4.5
+          - Near-duplicate detection ignores whitespace-only and case-only diffs
+
+      - id: US-2.3
+        title: View scan progress with live status
+        story: >
+          As a user, I want to see progress through each scan stage
+          so that I know the scan is working and how far along it is.
+        acceptance_criteria:
+          - Given a running scan
+            When each stage executes
+            Then the UI shows the current stage among the 7 defined stages
+          - Given a running scan
+            When files are processed
+            Then KPIs update (discovered, parsed, skipped, agent-like, tokens analyzed)
+          - Given a failure
+            When it occurs
+            Then the exact status (ImportFailed / ParseFailed / InsufficientData) is shown
+
+  - id: EPIC-3
+    title: Verdict & Recommendations
+    stories:
+
+      - id: US-3.1
+        title: Generate an efficiency verdict
+        story: >
+          As a user, I want a weighted 0-100 score and a verdict label
+          so that I can quickly judge repo health.
+        acceptance_criteria:
+          - Given completed category scores
+            When the verdict is generated
+            Then a weighted 0-100 score is produced
+            (Redundancy 25, Token bloat 25, Review overhead 20, Agent sprawl 20, Architecture 10)
+          - Given the overall score
+            When mapping to a verdict
+            Then it returns Lean (80-100), Watchlist (60-79), Wasteful (40-59), or Critical (0-39)
+          - Given the results
+            When displayed
+            Then the top 5 waste drivers are summarized at ~grade 8 reading level
+
+      - id: US-3.2
+        title: See transparent savings estimates
+        story: >
+          As a user, I want to see estimated token/credit/dollar savings with assumptions
+          so that I can trust and act on the numbers.
+        acceptance_criteria:
+          - Given a valid completed scan
+            When savings are shown
+            Then both token and credit estimates appear with all assumptions
+          - Given aggregate savings
+            When displayed
+            Then a low/high range using +/-20% variance is shown
+          - Given the token formula
+            When the report is viewed
+            Then ceil(character_count / 4) is displayed
+          - Given InsufficientData status
+            When results load
+            Then no savings are calculated or shown
+
+      - id: US-3.3
+        title: Generate draft replacement files
+        story: >
+          As a user, I want AI-drafted replacements for bloated agent/instruction files
+          so that I can act on recommendations immediately.
+        acceptance_criteria:
+          - Given eligible files (instruction, orchestrator, context, memory)
+            When recommendations run
+            Then up to 25 draft files are generated with impact and effort labels
+          - Given source code files
+            When recommendations run
+            Then no replacement drafts are generated for them
+          - Given generated drafts
+            When viewed
+            Then each is copyable in-app and downloadable as a .zip
+
+  - id: EPIC-4
+    title: Reporting & Export
+    stories:
+
+      - id: US-4.1
+        title: View the scan results dashboard
+        story: >
+          As a user, I want a dashboard of KPIs, category scores, and issues
+          so that I can explore findings in one place.
+        acceptance_criteria:
+          - Given a completed scan
+            When I open results
+            Then top KPIs, 5 category score cards, top 5 waste drivers,
+            issue table, file inventory, skipped warnings, savings assumptions,
+            recommended actions, and draft previews are all shown
+          - Given >20% of files skipped
+            When results load
+            Then a PartialScan badge appears on the verdict
+          - Given >=1 skipped file
+            When results load
+            Then a warning banner shows the count and reasons
+
+      - id: US-4.2
+        title: Export reports
+        story: >
+          As a user, I want to export reports in multiple formats
+          so that I can share findings with stakeholders.
+        acceptance_criteria:
+          - Given a completed scan
+            When I export
+            Then full PDF (<=40 pages), redacted PDF (<=25 pages), CSV (one row per issue),
+            and draft .zip are available
+          - Given the redacted report
+            When generated
+            Then file contents are removed and names replaced with path aliases,
+            while counts, score, category findings, and savings are preserved
+          - Given PDF generation fails
+            When I export
+            Then an HTML print view fallback is offered
+          - Given CSV generation fails
+            When I export
+            Then a copy-to-clipboard fallback for the issue table is offered
+
+      - id: US-4.3
+        title: Use the VS Code handoff package
+        story: >
+          As a user, I want a downloadable handoff package
+          so that I can apply recommendations in my editor.
+        acceptance_criteria:
+          - Given a completed scan
+            When I trigger handoff
+            Then a package with efficiency-summary.md, recommended-instruction.md,
+            recommended-orchestrator.md, recommended-context.md, and findings.csv is produced
+          - Given the browser cannot launch a local URI
+            When I click Open in VS Code
+            Then manual instructions and a download are shown as fallback
+
+  - id: EPIC-5
+    title: History & Data Management
+    stories:
+
+      - id: US-5.1
+        title: View scan history
+        story: >
+          As a user, I want to see my recent scans
+          so that I can revisit and compare past analyses.
+        acceptance_criteria:
+          - Given prior scans
+            When I open history
+            Then up to the last 10 scans show date, source, repo name, branch,
+            score, verdict, files scanned, files skipped, and estimated savings
+          - Given a history row
+            When I choose an action
+            Then I can Open, Download report, or Delete it
+
+      - id: US-5.2
+        title: Delete a scan
+        story: >
+          As a user, I want to delete a scan
+          so that I can remove analyses I no longer need.
+        acceptance_criteria:
+          - Given a scan in history
+            When I delete it
+            Then it is removed from the history view
+          - Given retention rules
+            When time elapses
+            Then imported/zip content is purged after 7 days and
+            derived metadata/reports after 30 days

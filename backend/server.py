@@ -209,7 +209,7 @@ async def create_scan(
     repo_url: str | None = Form(None),
     branch: str | None = Form(None),
     zip_file: UploadFile | None = File(None),
-    md_files: list[UploadFile] | None = File(None),
+    md_files: list[UploadFile] = File(default=[]),
 ):
     if not rights_ack:
         raise HTTPException(

@@ -173,3 +173,36 @@ tab switching works, and the results page reports zero console errors.
 Flagged by the deployment check as a blocker: the deployment bundle needs them. The patterns were
 removed. Note the trade-off — if you sync to GitHub, `backend/.env` now carries the Mongo URL and the
 Universal LLM key, so either keep that repository private or strip the file before pushing.
+
+---
+
+## Deployment readiness verdict
+
+**Deployment agent: PASS, zero findings.** Env vars read from the environment in both tiers, no
+hardcoded URLs or secrets, backend on `0.0.0.0:8001`, every route under `/api`, CORS from
+`CORS_ORIGINS`, MongoDB only, supervisor config valid, no ignore-file blockers, queries use
+projections and limits, and neither the startup series migration nor the new index creation blocks
+startup (both are wrapped so failures are logged rather than fatal).
+
+**Testing agent iteration 8: 26/26 backend, frontend clean, no regressions.** Both bug fixes from the
+health sweep were verified independently rather than by my own inspection:
+- draft ids are unique across the database; generating a new draft picks a free id; regenerating an
+  existing file replaces its draft without creating a duplicate;
+- the drafts tab strip renders 7 tabs and switches between them with no React key warnings;
+- markdown series naming groups an identical file set and separates a different one;
+- the series model, all eight export endpoints, the archive bundle, the archive toggle, CSV
+  well-formedness and every page still behave.
+
+Database state after testing: 26 scans, 25 series (20 archived), 22 drafts all uniquely identified,
+zero orphans, `myday-2.0` still at 2 runs with a -24 delta. The testing agent removed its own
+fixtures and changed no application code.
+
+### One known limitation to be aware of, not a blocker
+Deployment runs 2 replicas, and `scans.workspace_dir` points at imported repository content on the
+replica's local disk. Scoring, history, exports and archive bundles all read from MongoDB and are
+unaffected. Only *on-demand* draft generation reads the original file from disk, so a draft request
+routed to the replica that did not run the scan will report "the imported repository content has
+expired, re-run the scan" even though the 7 day window is still open. The user-facing behaviour is a
+clear message rather than an error, so this is a graceful degradation. Proper fixes, for a later
+phase: put imported content in object storage, or store the source text of the draft candidates in
+Mongo at scan time (they are capped at 25 files, so the cost is small).

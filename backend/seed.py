@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import random
 from datetime import timedelta
 
 from core.analyzer import analyze
@@ -156,8 +155,9 @@ def _agent_body(name: str, job: str, include_block: bool, stages: list, padding:
 
 def build_entries(spec: dict, badness: float, final: bool = False) -> list:
     """Generate the file entries for one synthetic repository."""
+    # Fully deterministic: every knob below is derived from the badness dial and the spec,
+    # so a given seed spec always produces byte-identical demo data. No RNG is involved.
     b = max(0.0, min(1.0, badness))
-    rng = random.Random(f"{spec['repo']}-{spec.get('days')}")
     md_only = bool(spec.get("md_only"))
     entries: list = []
 

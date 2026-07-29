@@ -287,6 +287,14 @@ async def run_scan(scan_id: str, spec: dict):
                         await _set_stage(scan_id, "drafting", "running",
                                          f"{made} of {min(auto_count, len(candidates))} drafts written")
                     except Exception as exc:  # noqa: BLE001
+                        text = str(exc).lower()
+                        if any(m in text for m in ("spend limit", "quota", "billing", "credit balance")):
+                            draft_errors.append(
+                                "The language model budget has run out, so drafts were not written. "
+                                "Top up your Universal Key balance or add your own key in Settings, "
+                                "then use Generate on any eligible file."
+                            )
+                            break
                         log.exception("draft failed for %s", target["source_path"])
                         draft_errors.append(f"{target['target_filename']}: {exc}")
         detail = f"{made} draft file(s) written" if made else "No drafts were generated"

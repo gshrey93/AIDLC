@@ -191,7 +191,6 @@ async def generate_draft(
         return _clean_output("".join(buf))
 
     draft = await run()
-    source_tokens = int(target.get("source_tokens") or 0)
     source_chars = len(target.get("content") or "")
     min_expected = max(MIN_DRAFT_CHARS, int(min(source_chars, MAX_SOURCE_CHARS) * 0.18))
     if len(draft) < min_expected:

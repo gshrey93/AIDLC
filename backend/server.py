@@ -45,6 +45,22 @@ app.add_middleware(
 )
 
 SEED_STATE = {"status": "idle", "seeded": 0, "target": len(SEED_SPECS), "error": None}
+
+# Markers that mean "the model provider refused on budget/quota grounds" rather than a code fault.
+LLM_BUDGET_MARKERS = (
+    "spend limit", "daily spend", "quota", "insufficient_quota", "billing",
+    "credit balance", "exceeded your current quota", "rate_limit_exceeded",
+)
+LLM_BUDGET_MESSAGE = (
+    "The language model budget has run out, so no new draft could be written. Top up your "
+    "Universal Key balance (Profile > Universal Key > Add Balance), or add your own Anthropic or "
+    "Gemini key in Settings. Everything else in this scan is unaffected."
+)
+
+
+def _is_llm_budget_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(marker in text for marker in LLM_BUDGET_MARKERS)
 GITHUB_URL_HINT = "https://github.com/{owner}/{repo}"
 
 
@@ -363,6 +379,7 @@ async def remove_scan(scan_id: str):
 @api.post("/scans/{scan_id}/drafts")
 async def create_draft(scan_id: str, body: DraftRequest):
     await _get_scan_or_404(scan_id)
+    draft: dict | None = None
     try:
         draft = await generate_single_draft(scan_id, body.source_path)
     except ValueError as exc:
@@ -372,6 +389,9 @@ async def create_draft(scan_id: str, body: DraftRequest):
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
+        if _is_llm_budget_error(exc):
+            log.warning("draft blocked by LLM budget: %s", exc)
+            raise HTTPException(status_code=402, detail=LLM_BUDGET_MESSAGE) from exc
         log.exception("draft generation failed")
         raise HTTPException(status_code=500, detail=f"Draft generation failed: {exc}") from exc
     return serialize(draft)
@@ -485,6 +505,7 @@ async def read_settings():
 
 @api.put("/settings")
 async def write_settings(patch: SettingsPatch):
+    updated: dict
     try:
         updated = await update_settings(patch.model_dump(exclude_unset=True))
     except ValueError as exc:
@@ -510,6 +531,7 @@ RATE_PROMPT = (
 @api.post("/settings/refresh-rates")
 async def refresh_rates():
     settings = await get_settings()
+    api_key = provider = model = key_source = ""
     try:
         api_key, provider, model, key_source = resolve_llm_credentials(settings)
     except RuntimeError as exc:
@@ -528,6 +550,8 @@ async def refresh_rates():
             elif isinstance(ev, StreamDone):
                 break
     except Exception as exc:  # noqa: BLE001
+        if _is_llm_budget_error(exc):
+            raise HTTPException(status_code=402, detail=LLM_BUDGET_MESSAGE) from exc
         log.exception("rate refresh failed")
         raise HTTPException(status_code=502, detail=f"Could not reach the model: {exc}") from exc
 
@@ -535,6 +559,7 @@ async def refresh_rates():
     match = re.search(r"\{.*\}", raw, re.S)
     if not match:
         raise HTTPException(status_code=502, detail=f"The model did not return usable JSON: {raw[:200]}")
+    parsed: dict = {}
     try:
         parsed = json.loads(match.group(0))
     except json.JSONDecodeError as exc:

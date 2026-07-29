@@ -5,7 +5,7 @@ import math
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from .config import (
     AGENT_DIR_PARTS, AGENT_FILENAMES, AGENT_LIKE_CATEGORIES, AGENT_SUFFIXES,
@@ -81,31 +81,51 @@ class Inventory:
         return [f for f in self.files if f.parse_status == "Scanned"]
 
 
+class _AgentAssetRule(NamedTuple):
+    """One agent-asset classification rule: filename suffixes, exact names and path fragments."""
+
+    category: str
+    suffixes: tuple
+    filenames: frozenset
+    dir_parts: tuple
+
+
+# Evaluated in order, so the first matching rule wins. This preserves the original
+# agent > skill > context > orchestration precedence while replacing a 14-branch
+# if-chain with a single data-driven loop.
+_AGENT_ASSET_RULES: tuple = (
+    _AgentAssetRule(CATEGORY_AGENT, AGENT_SUFFIXES, frozenset(AGENT_FILENAMES), AGENT_DIR_PARTS),
+    _AgentAssetRule(CATEGORY_SKILL, SKILL_SUFFIXES, frozenset(SKILL_FILENAMES), SKILL_DIR_PARTS),
+    _AgentAssetRule(CATEGORY_CONTEXT, CONTEXT_SUFFIXES, frozenset(CONTEXT_FILENAMES), CONTEXT_DIR_PARTS),
+    _AgentAssetRule(
+        CATEGORY_ORCHESTRATION, ORCHESTRATION_SUFFIXES,
+        frozenset(ORCHESTRATION_FILENAMES), ORCHESTRATION_DIR_PARTS,
+    ),
+)
+
+_EXTENSION_CATEGORIES: tuple = (
+    (DIAGRAM_EXTENSIONS, CATEGORY_DIAGRAM),
+    (SOURCE_EXTENSIONS, CATEGORY_SOURCE),
+)
+
+
 def classify(rel_path: str) -> str:
-    p = "/" + rel_path.replace("\\", "/").lower()
-    name = p.rsplit("/", 1)[-1]
+    """Map a repository-relative path to a FileAsset category."""
+    path = "/" + rel_path.replace("\\", "/").lower()
+    name = path.rsplit("/", 1)[-1]
     ext = os.path.splitext(name)[1]
 
-    if any(name.endswith(s) for s in AGENT_SUFFIXES) or name in AGENT_FILENAMES:
-        return CATEGORY_AGENT
-    if any(part in p for part in AGENT_DIR_PARTS):
-        return CATEGORY_AGENT
-    if any(name.endswith(s) for s in SKILL_SUFFIXES) or name in SKILL_FILENAMES:
-        return CATEGORY_SKILL
-    if any(part in p for part in SKILL_DIR_PARTS):
-        return CATEGORY_SKILL
-    if any(name.endswith(s) for s in CONTEXT_SUFFIXES) or name in CONTEXT_FILENAMES:
-        return CATEGORY_CONTEXT
-    if any(part in p for part in CONTEXT_DIR_PARTS):
-        return CATEGORY_CONTEXT
-    if any(name.endswith(s) for s in ORCHESTRATION_SUFFIXES) or name in ORCHESTRATION_FILENAMES:
-        return CATEGORY_ORCHESTRATION
-    if any(part in p for part in ORCHESTRATION_DIR_PARTS):
-        return CATEGORY_ORCHESTRATION
-    if ext in DIAGRAM_EXTENSIONS:
-        return CATEGORY_DIAGRAM
-    if ext in SOURCE_EXTENSIONS:
-        return CATEGORY_SOURCE
+    for rule in _AGENT_ASSET_RULES:
+        if (
+            name in rule.filenames
+            or name.endswith(rule.suffixes)
+            or any(part in path for part in rule.dir_parts)
+        ):
+            return rule.category
+
+    for extensions, category in _EXTENSION_CATEGORIES:
+        if ext in extensions:
+            return category
     return CATEGORY_OTHER
 
 
@@ -182,91 +202,97 @@ def inventory_from_entries(entries: list) -> Inventory:
     return inv
 
 
-def build_inventory(root_dir: str, progress_cb=None) -> Inventory:
-    inv = Inventory()
-    all_paths: list = []
+class _TextBudget:
+    """Tracks how much repository text has been retained for in-memory analysis."""
+
+    def __init__(self, limit: int = MAX_RETAINED_TEXT_BYTES):
+        self.limit = limit
+        self.used = 0
+        self.exhausted_reported = False
+
+    def has_room(self) -> bool:
+        return self.used < self.limit
+
+    def take(self, chars: int) -> None:
+        self.used += chars
+
+
+def _walk_repository(root_dir: str) -> list:
+    """Return [(relative_path, absolute_path)] for every analysable file on disk."""
+    found: list = []
     for dirpath, dirnames, filenames in os.walk(root_dir):
         dirnames[:] = [d for d in dirnames if d not in IGNORED_DIR_PARTS and not d.startswith(".git")]
         for fn in filenames:
             full = os.path.join(dirpath, fn)
             rel = os.path.relpath(full, root_dir).replace("\\", "/")
-            all_paths.append((rel, full))
+            found.append((rel, full))
+    return found
 
-    inv.total_files = len(all_paths)
 
-    def priority(item):
-        rel, _ = item
-        cat = classify(rel)
-        ext = os.path.splitext(rel)[1].lower()
-        if cat in AGENT_LIKE_CATEGORIES:
-            return (0, rel)
-        if ext in SUPPORTED_EXTENSIONS:
-            return (1, rel)
-        return (2, rel)
+def _scan_priority(item: tuple) -> tuple:
+    """Agent assets first, then other supported text, then everything else."""
+    rel, _ = item
+    ext = os.path.splitext(rel)[1].lower()
+    if classify(rel) in AGENT_LIKE_CATEGORIES:
+        return (0, rel)
+    if ext in SUPPORTED_EXTENSIONS:
+        return (1, rel)
+    return (2, rel)
 
-    all_paths.sort(key=priority)
-    considered = all_paths[:MAX_FILES]
-    retained = [0]
-    memory_warned = [False]
-    if len(all_paths) > MAX_FILES:
-        inv.truncated = True
-        inv.warnings.append(
-            f"Repository contains {len(all_paths)} files which is above the {MAX_FILES} file limit. "
-            f"The {MAX_FILES} most relevant files (agent assets first) were inventoried; "
-            f"{len(all_paths) - MAX_FILES} files were not included."
-        )
 
-    for idx, (rel, full) in enumerate(considered):
-        ext = os.path.splitext(rel)[1].lower()
-        category = classify(rel)
-        group = inventory_group_for(category, ext)
-        try:
-            size = os.path.getsize(full)
-        except OSError:
-            size = 0
-        rec = FileRecord(
-            path=rel, extension=ext, category=category, inventory_group=group,
-            size_bytes=size, agent_like=category in AGENT_LIKE_CATEGORIES,
-        )
+def _file_size(path: str) -> int:
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
 
-        if ext not in SUPPORTED_EXTENSIONS:
-            rec.parse_status = "SkippedUnsupported"
-            rec.skip_reason = f"Extension '{ext or 'none'}' is not in the supported analysis list"
-        elif size > MAX_PARSE_FILE_BYTES:
-            rec.parse_status = "SkippedOversized"
-            rec.skip_reason = f"File is {size / 1048576:.1f} MB which is above the 5 MB parse limit"
-        else:
-            try:
-                with open(full, "rb") as fh:
-                    blob = fh.read()
-                if _looks_binary(blob):
-                    rec.parse_status = "Binary"
-                    rec.skip_reason = "File contains binary data"
-                else:
-                    text = blob.decode("utf-8", errors="replace")
-                    rec.line_count = text.count("\n") + (1 if text and not text.endswith("\n") else 0)
-                    rec.estimated_tokens = estimate_tokens(len(text))
-                    rec.parse_status = "Scanned"
-                    if retained[0] < MAX_RETAINED_TEXT_BYTES:
-                        clipped = text[:MAX_RETAINED_CHARS_PER_FILE]
-                        rec.norm = normalise(clipped)
-                        if category in AGENT_LIKE_CATEGORIES or ext in DOC_EXTENSIONS:
-                            rec.content = clipped
-                        retained[0] += len(clipped)
-                    elif not memory_warned[0]:
-                        memory_warned[0] = True
-                        inv.warnings.append(
-                            "Repository text exceeded the in-memory analysis budget. Metadata and token "
-                            "counts are complete, but duplicate detection covers the most relevant files only."
-                        )
-            except Exception as exc:
-                rec.parse_status = "ParseError"
-                rec.skip_reason = f"Could not read file: {exc}"
 
-        inv.files.append(rec)
-        if progress_cb and idx % 200 == 0:
-            progress_cb(idx, len(considered))
+def _retain_text(rec: FileRecord, text: str, budget: _TextBudget, inv: Inventory) -> None:
+    """Keep a clipped copy of the text for similarity and block detection, within budget."""
+    if not budget.has_room():
+        if not budget.exhausted_reported:
+            budget.exhausted_reported = True
+            inv.warnings.append(
+                "Repository text exceeded the in-memory analysis budget. Metadata and token "
+                "counts are complete, but duplicate detection covers the most relevant files only."
+            )
+        return
+    clipped = text[:MAX_RETAINED_CHARS_PER_FILE]
+    rec.norm = normalise(clipped)
+    if rec.category in AGENT_LIKE_CATEGORIES or rec.extension in DOC_EXTENSIONS:
+        rec.content = clipped
+    budget.take(len(clipped))
 
+
+def _parse_file(rec: FileRecord, full: str, budget: _TextBudget, inv: Inventory) -> None:
+    """Populate parse status, line count, tokens and retained text for one file."""
+    if rec.extension not in SUPPORTED_EXTENSIONS:
+        rec.parse_status = "SkippedUnsupported"
+        rec.skip_reason = f"Extension '{rec.extension or 'none'}' is not in the supported analysis list"
+        return
+    if rec.size_bytes > MAX_PARSE_FILE_BYTES:
+        rec.parse_status = "SkippedOversized"
+        rec.skip_reason = f"File is {rec.size_bytes / 1048576:.1f} MB which is above the 5 MB parse limit"
+        return
+    try:
+        with open(full, "rb") as fh:
+            blob = fh.read()
+    except Exception as exc:  # noqa: BLE001 - surfaced to the user as ParseError
+        rec.parse_status = "ParseError"
+        rec.skip_reason = f"Could not read file: {exc}"
+        return
+    if _looks_binary(blob):
+        rec.parse_status = "Binary"
+        rec.skip_reason = "File contains binary data"
+        return
+    text = blob.decode("utf-8", errors="replace")
+    rec.line_count = text.count("\n") + (1 if text and not text.endswith("\n") else 0)
+    rec.estimated_tokens = estimate_tokens(len(text))
+    rec.parse_status = "Scanned"
+    _retain_text(rec, text, budget, inv)
+
+
+def _finalise_inventory(inv: Inventory) -> Inventory:
     inv.parsed_files = sum(1 for f in inv.files if f.parse_status == "Scanned")
     inv.skipped_files = sum(1 for f in inv.files if f.parse_status != "Scanned")
     inv.analyzed_tokens = sum(f.estimated_tokens for f in inv.files if f.parse_status == "Scanned")
@@ -276,3 +302,34 @@ def build_inventory(root_dir: str, progress_cb=None) -> Inventory:
             reasons[f.parse_status] = reasons.get(f.parse_status, 0) + 1
     inv.skip_reasons = reasons
     return inv
+
+
+def build_inventory(root_dir: str, progress_cb=None) -> Inventory:
+    inv = Inventory()
+    all_paths = _walk_repository(root_dir)
+    inv.total_files = len(all_paths)
+    all_paths.sort(key=_scan_priority)
+    considered = all_paths[:MAX_FILES]
+    if len(all_paths) > MAX_FILES:
+        inv.truncated = True
+        inv.warnings.append(
+            f"Repository contains {len(all_paths)} files which is above the {MAX_FILES} file limit. "
+            f"The {MAX_FILES} most relevant files (agent assets first) were inventoried; "
+            f"{len(all_paths) - MAX_FILES} files were not included."
+        )
+
+    budget = _TextBudget()
+    for idx, (rel, full) in enumerate(considered):
+        ext = os.path.splitext(rel)[1].lower()
+        category = classify(rel)
+        rec = FileRecord(
+            path=rel, extension=ext, category=category,
+            inventory_group=inventory_group_for(category, ext),
+            size_bytes=_file_size(full), agent_like=category in AGENT_LIKE_CATEGORIES,
+        )
+        _parse_file(rec, full, budget, inv)
+        inv.files.append(rec)
+        if progress_cb and idx % 200 == 0:
+            progress_cb(idx, len(considered))
+
+    return _finalise_inventory(inv)

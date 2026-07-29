@@ -439,6 +439,7 @@ def _common_sections(payload, st, redacted, alias, issue_limit, file_limit):
 def full_pdf(payload: dict) -> bytes:
     st = _styles()
     issue_limit, file_limit, draft_limit = 200, 120, 25
+    data: bytes = b""
     for _ in range(5):
         story = _common_sections(payload, st, False, {}, issue_limit, file_limit)
         drafts = payload.get("drafts", [])
@@ -471,6 +472,7 @@ def redacted_pdf(payload: dict) -> bytes:
     st = _styles()
     alias = build_alias_map([f["path"] for f in payload.get("files", [])])
     issue_limit, file_limit = 120, 60
+    data: bytes = b""
     for _ in range(5):
         story = _common_sections(payload, st, True, alias, issue_limit, file_limit)
         drafts = payload.get("drafts", [])

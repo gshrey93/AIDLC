@@ -169,6 +169,7 @@ def import_github(url: str, branch: Optional[str], work_dir: str, token: Optiona
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
+    default_branch: Optional[str] = None
     try:
         with httpx.Client(timeout=30.0, follow_redirects=True) as client:
             meta = client.get(f"https://api.github.com/repos/{owner}/{repo}", headers=headers)
@@ -216,6 +217,7 @@ def import_github(url: str, branch: Optional[str], work_dir: str, token: Optiona
 
     zip_path = os.path.join(work_dir, "archive.zip")
     archive_url = f"https://codeload.github.com/{owner}/{repo}/zip/refs/heads/{branch}"
+    size = 0
     try:
         size = _download_archive(archive_url, zip_path, headers, "RepoTooLarge")
     except ImportError_ as exc:
@@ -252,6 +254,7 @@ def import_bitbucket(url: str, branch: Optional[str], work_dir: str, token: Opti
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
+    default_branch: Optional[str] = None
     try:
         with httpx.Client(timeout=30.0, follow_redirects=True) as client:
             meta = client.get(f"https://api.bitbucket.org/2.0/repositories/{owner}/{repo}", headers=headers)
@@ -295,6 +298,7 @@ def import_bitbucket(url: str, branch: Optional[str], work_dir: str, token: Opti
 
     zip_path = os.path.join(work_dir, "archive.zip")
     archive_url = f"https://bitbucket.org/{owner}/{repo}/get/{branch}.zip"
+    size = 0
     try:
         size = _download_archive(archive_url, zip_path, headers, "RepoTooLarge")
     except ImportError_ as exc:

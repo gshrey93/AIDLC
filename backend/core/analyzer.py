@@ -5,11 +5,12 @@ import os
 import re
 import statistics
 from collections import defaultdict
+from typing import NamedTuple
 from datetime import datetime, timezone
 
 from .classifier import Inventory, estimate_tokens, is_generated, normalise
 from .config import (
-    AGENT_LIKE_CATEGORIES, AGENT_SPRAWL_THRESHOLD, CATEGORY_AGENT, CATEGORY_CONTEXT,
+    AGENT_SPRAWL_THRESHOLD, CATEGORY_AGENT, CATEGORY_CONTEXT,
     CATEGORY_LABELS, CATEGORY_ORCHESTRATION, CATEGORY_SKILL, CATEGORY_SOURCE,
     CATEGORY_WEIGHTS, MICROSERVICE_DIR_THRESHOLD, MICROSERVICE_SOURCE_FLOOR,
     MIN_CHARS_FOR_SIMILARITY, MIN_TEXT_FILES_FOR_VALID_SCAN, MONOLITH_AGENT_ROLE_THRESHOLD,
@@ -31,6 +32,53 @@ def _short(path: str, width: int = 58) -> str:
 
 
 # ------------------------------------------------------------- detections
+def _score_candidate_pairs(pairs, sketches: list, shingles: list) -> list:
+    """Refine LSH candidate pairs into (a, b, exact_similarity) above the overlap threshold."""
+    scored = []
+    for left, right in pairs:
+        if sketch_jaccard(sketches[left], sketches[right]) < 0.30:
+            continue
+        similarity = exact_jaccard(shingles[left], shingles[right])
+        if similarity >= SIMILARITY_OVERLAP_THRESHOLD:
+            scored.append((left, right, similarity))
+    return scored
+
+
+def _build_duplicate_clusters(groups: dict, candidates: list, pair_sim: dict) -> list:
+    """Turn union-find groups of >=0.80 similar files into reportable cluster records."""
+    clusters = []
+    for index, (_, members) in enumerate(sorted(groups.items()), start=1):
+        member_files = [candidates[m] for m in members]
+        sims = [v for (left, right), v in pair_sim.items() if left in members and right in members]
+        group_id = f"DUP-{index:03d}"
+        for member in member_files:
+            member.similarity_group = group_id
+        clusters.append({
+            "group_id": group_id,
+            "files": [f.path for f in member_files],
+            "file_records": member_files,
+            "max_similarity": round(max(sims) if sims else SIMILARITY_DUPLICATE_THRESHOLD, 4),
+            "avg_similarity": round(sum(sims) / len(sims), 4) if sims else SIMILARITY_DUPLICATE_THRESHOLD,
+            "agent_like_members": [f.path for f in member_files if f.agent_like],
+            "tokens": [f.estimated_tokens for f in member_files],
+        })
+    return clusters
+
+
+def _build_overlap_groups(groups: dict, candidates: list) -> list:
+    """Groups of >=0.50 similar agent assets, used as the overlapping-responsibility signal."""
+    overlap_groups = []
+    for index, (_, members) in enumerate(sorted(groups.items()), start=1):
+        agentish = [candidates[m] for m in members if candidates[m].agent_like]
+        if len(agentish) >= 2:
+            overlap_groups.append({
+                "group_id": f"OVL-{index:03d}",
+                "files": [f.path for f in agentish],
+                "roles": len(agentish),
+            })
+    return overlap_groups
+
+
 def detect_near_duplicates(files: list):
     """Return (clusters, overlap_groups) where clusters use >=0.80 similarity."""
     candidates = [
@@ -41,17 +89,8 @@ def detect_near_duplicates(files: list):
         return [], []
 
     shingles = [shingle_set(f.norm) for f in candidates]
-    sketches = [bottom_k_sketch(s) for s in shingles]
-    pairs = candidate_pairs(sketches)
-
-    scored = []
-    for a, b in pairs:
-        est = sketch_jaccard(sketches[a], sketches[b])
-        if est < 0.30:
-            continue
-        sim = exact_jaccard(shingles[a], shingles[b])
-        if sim >= SIMILARITY_OVERLAP_THRESHOLD:
-            scored.append((a, b, sim))
+    sketches = [bottom_k_sketch(sig) for sig in shingles]
+    scored = _score_candidate_pairs(candidate_pairs(sketches), sketches, shingles)
 
     dup_uf = UnionFind(len(candidates))
     ovl_uf = UnionFind(len(candidates))
@@ -62,33 +101,8 @@ def detect_near_duplicates(files: list):
             dup_uf.union(a, b)
             pair_sim[(a, b)] = sim
 
-    clusters = []
-    for gi, (_, members) in enumerate(sorted(dup_uf.groups().items()), start=1):
-        member_files = [candidates[m] for m in members]
-        sims = [s for (a, b), s in pair_sim.items() if a in members and b in members]
-        group_id = f"DUP-{gi:03d}"
-        for mf in member_files:
-            mf.similarity_group = group_id
-        clusters.append({
-            "group_id": group_id,
-            "files": [f.path for f in member_files],
-            "file_records": member_files,
-            "max_similarity": round(max(sims) if sims else SIMILARITY_DUPLICATE_THRESHOLD, 4),
-            "avg_similarity": round(sum(sims) / len(sims), 4) if sims else SIMILARITY_DUPLICATE_THRESHOLD,
-            "agent_like_members": [f.path for f in member_files if f.agent_like],
-            "tokens": [f.estimated_tokens for f in member_files],
-        })
-
-    overlap_groups = []
-    for gi, (_, members) in enumerate(sorted(ovl_uf.groups().items()), start=1):
-        member_files = [candidates[m] for m in members]
-        agentish = [f for f in member_files if f.agent_like]
-        if len(agentish) >= 2:
-            overlap_groups.append({
-                "group_id": f"OVL-{gi:03d}",
-                "files": [f.path for f in agentish],
-                "roles": len(agentish),
-            })
+    clusters = _build_duplicate_clusters(dup_uf.groups(), candidates, pair_sim)
+    overlap_groups = _build_overlap_groups(ovl_uf.groups(), candidates)
     return clusters, overlap_groups
 
 
@@ -171,6 +185,43 @@ def detect_architecture(files: list):
     }
 
 
+# --------------------------------------------------- tier 2 severity scaling
+# Tier 1 (the seven specified rules) is hard capped, which alone makes any overall score below
+# about 72 impossible and would leave the Wasteful and Critical verdicts unreachable. Tier 2
+# scales with HOW MUCH waste there is: for each category we take the share of the monthly agent
+# context budget that the category wastes and deduct proportionally, up to that category's tier 2
+# cap. A category wasting FULL_SCALE_SHARE or more of the budget takes the full deduction.
+SCALE_CAPS = {
+    "redundancy": 60, "token_bloat": 60, "review_overhead": 55,
+    "agent_sprawl": 60, "architecture_inefficiency": 50,
+}
+FULL_SCALE_SHARE = 0.50
+
+
+class Tier2Scaling(NamedTuple):
+    monthly_agent_budget: float
+    waste_by_category: dict
+    waste_shares: dict
+    penalties: dict
+
+
+def compute_tier2_scaling(issue_records: list, agent_asset_tokens: int, runs_per_month: float,
+                          insufficient: bool) -> Tier2Scaling:
+    """Return the tier 2 deduction per category, plus the shares used to derive it."""
+    budget = max(1.0, agent_asset_tokens * runs_per_month)
+    by_category: dict = {key: 0 for key in CATEGORY_WEIGHTS}
+    for record in issue_records:
+        key = record["category"]
+        by_category[key] = by_category.get(key, 0) + record["estimated_token_waste"]
+    shares = {key: (by_category.get(key, 0) / budget) for key in CATEGORY_WEIGHTS}
+    deductions = {
+        key: (0 if insufficient
+              else int(round(SCALE_CAPS[key] * min(1.0, shares[key] / FULL_SCALE_SHARE))))
+        for key in CATEGORY_WEIGHTS
+    }
+    return Tier2Scaling(budget, by_category, shares, deductions)
+
+
 # ---------------------------------------------------------------- scoring
 def _capped(count: int, key: str) -> int:
     cfg = PENALTIES[key]
@@ -236,14 +287,11 @@ def analyze(inventory: Inventory, assumptions_overrides: dict | None = None, sca
         if c["agent_like_members"]:
             toks = sorted(c["tokens"], reverse=True)
             redundant_tokens_total += sum(toks[1:])
-    block_waste_tokens = sum(b["block_tokens"] * (b["file_count"] - 1) for b in blocks)
     context_excess_tokens = sum(max(0, f.estimated_tokens - OVERSIZED_CONTEXT_TOKENS) for f in context_files)
     agent_token_list = [f.estimated_tokens for f in agent_like if f.estimated_tokens]
     median_agent_tokens_pre = int(statistics.median(agent_token_list)) if agent_token_list else 0
 
     dup_share = redundant_tokens_total / agent_token_total
-    block_share = block_waste_tokens / agent_token_total
-    context_share = context_excess_tokens / agent_token_total
 
     total_considered = len(files) or 1
     skip_ratio = inventory.skipped_files / total_considered
@@ -269,7 +317,6 @@ def analyze(inventory: Inventory, assumptions_overrides: dict | None = None, sca
     agent_tokens = [f.estimated_tokens for f in agent_like if f.estimated_tokens]
     median_agent_tokens = int(statistics.median(agent_tokens)) if agent_tokens else 0
     instruction_tokens = [f.estimated_tokens for f in (orchestration_files + agent_role) if f.estimated_tokens]
-    avg_instruction_tokens = int(statistics.mean(instruction_tokens)) if instruction_tokens else 0
     total_instruction_tokens = sum(instruction_tokens)
     total_agent_like_tokens = sum(agent_tokens)
 
@@ -474,29 +521,12 @@ def analyze(inventory: Inventory, assumptions_overrides: dict | None = None, sca
 
     issues.sort(key=lambda i: -i["estimated_token_waste"])
 
-    # ---- tier 2: severity scaling ---------------------------------------
-    # Tier 1 (the seven specified rules) is hard capped, which alone makes any score below ~72
-    # impossible and would leave the Wasteful and Critical verdicts unreachable. Tier 2 scales with
-    # HOW MUCH waste there is: for each category we take the share of the monthly agent context
-    # budget that the category wastes, and deduct proportionally up to that category's tier 2 cap.
-    # Reference point: a category that wastes 30% or more of the monthly agent context budget takes
-    # the full tier 2 deduction. Everything is itemised in the score ledger.
-    monthly_agent_budget = max(1.0, agent_token_total * runs)
-    waste_by_category: dict = {k: 0 for k in CATEGORY_WEIGHTS}
-    for iss in issues:
-        waste_by_category[iss["category"]] = waste_by_category.get(iss["category"], 0) + iss["estimated_token_waste"]
-    SCALE_CAPS = {
-        "redundancy": 60, "token_bloat": 60, "review_overhead": 55,
-        "agent_sprawl": 60, "architecture_inefficiency": 50,
-    }
-    FULL_SCALE_SHARE = 0.50
-    waste_shares = {
-        k: (waste_by_category.get(k, 0) / monthly_agent_budget) for k in CATEGORY_WEIGHTS
-    }
-    scale_penalties = {
-        k: (0 if insufficient else int(round(SCALE_CAPS[k] * min(1.0, waste_shares[k] / FULL_SCALE_SHARE))))
-        for k in CATEGORY_WEIGHTS
-    }
+    # ---- tier 2: severity scaling (see compute_tier2_scaling above) ------
+    tier2 = compute_tier2_scaling(issues, agent_token_total, runs, insufficient)
+    monthly_agent_budget = tier2.monthly_agent_budget
+    waste_by_category = tier2.waste_by_category
+    waste_shares = tier2.waste_shares
+    scale_penalties = tier2.penalties
 
     cat_penalties = {
         "redundancy": penalty_near_dup + penalty_blocks + scale_penalties["redundancy"],
@@ -716,7 +746,7 @@ def analyze(inventory: Inventory, assumptions_overrides: dict | None = None, sca
             "monolith_mismatch": monolith_mismatch,
         },
         "clusters": [
-            {k: v for k, v in c.items() if k != "file_records"} for c in clusters[:60]
+            {k: v for k, v in cluster.items() if k != "file_records"} for cluster in clusters[:60]
         ],
         "overlap_groups": overlap_groups[:40],
     }

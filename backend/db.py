@@ -5,14 +5,16 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+from typing import Any, Optional
+
 from dotenv import load_dotenv
 from motor.motor_asyncio import AsyncIOMotorClient
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
 
-MONGO_URL = os.environ["MONGO_URL"]
-DB_NAME = os.environ.get("DB_NAME", "bloat_guardian")
+MONGO_URL: str = os.environ["MONGO_URL"]
+DB_NAME: str = os.environ.get("DB_NAME", "bloat_guardian")
 
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
@@ -26,14 +28,14 @@ export_jobs = db.export_jobs
 app_settings = db.app_settings
 users = db.users
 
-DEMO_USER_ID = "USR-DEMO-0001"
+DEMO_USER_ID: str = "USR-DEMO-0001"
 
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def serialize(doc):
+def serialize(doc: Any) -> Any:
     """Recursively make a Mongo document JSON-safe."""
     if doc is None:
         return None
@@ -48,7 +50,7 @@ def serialize(doc):
     return doc
 
 
-async def ensure_indexes():
+async def ensure_indexes() -> None:
     await scans.create_index("id", unique=True)
     await scans.create_index([("created_at", -1)])
     await file_assets.create_index("scan_id")
@@ -60,7 +62,7 @@ async def ensure_indexes():
     await users.create_index("id", unique=True)
 
 
-async def ensure_demo_user():
+async def ensure_demo_user() -> Optional[dict]:
     existing = await users.find_one({"id": DEMO_USER_ID})
     if not existing:
         await users.insert_one({

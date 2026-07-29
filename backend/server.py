@@ -462,14 +462,14 @@ async def export_archived_bundle():
 
     try:
         data = await asyncio.to_thread(export_mod.archive_bundle_zip, entries)
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        return _download(data, f"bloat-guardian-archive-{stamp}.zip", "application/zip")
     except Exception as exc:  # noqa: BLE001
         log.exception("archive bundle failed")
         raise HTTPException(
             status_code=500,
             detail=f"The archive bundle could not be built: {exc}. Download individual reports instead.",
         ) from exc
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    return _download(data, f"bloat-guardian-archive-{stamp}.zip", "application/zip")
 
 
 @api.get("/series/{series_id}")
@@ -630,7 +630,6 @@ async def read_settings():
 
 @api.put("/settings")
 async def write_settings(patch: SettingsPatch):
-    updated: dict
     try:
         updated = await update_settings(patch.model_dump(exclude_unset=True))
     except ValueError as exc:

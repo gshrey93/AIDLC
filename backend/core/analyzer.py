@@ -5,6 +5,7 @@ import os
 import re
 import statistics
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import NamedTuple
 from datetime import datetime, timezone
 
@@ -228,108 +229,156 @@ def _capped(count: int, key: str) -> int:
     return min(cfg["cap"], cfg["points"] * max(0, count))
 
 
-def analyze(inventory: Inventory, assumptions_overrides: dict | None = None, scan_date: datetime | None = None) -> dict:
-    a = merged_assumptions(assumptions_overrides)
-    scan_date = scan_date or datetime.now(timezone.utc)
-    date_key = scan_date.strftime("%Y-%m-%d")
-    files = inventory.files
-    parsed = [f for f in files if f.parse_status == "Scanned"]
+@dataclass
+class _Groups:
+    """The file sets every later stage works from."""
 
-    agent_like = [f for f in files if f.agent_like]
-    agent_role = [f for f in files if f.category == CATEGORY_AGENT]
+    parsed: list
+    agent_like: list
+    agent_role: list
+    context_files: list
+    orchestration_files: list
+    skill_files: list
+    oversized_context: list
+
+
+def _group_files(files: list) -> _Groups:
     context_files = [f for f in files if f.category == CATEGORY_CONTEXT]
-    orchestration_files = [f for f in files if f.category == CATEGORY_ORCHESTRATION]
-    skill_files = [f for f in files if f.category == CATEGORY_SKILL]
+    return _Groups(
+        parsed=[f for f in files if f.parse_status == "Scanned"],
+        agent_like=[f for f in files if f.agent_like],
+        agent_role=[f for f in files if f.category == CATEGORY_AGENT],
+        context_files=context_files,
+        orchestration_files=[f for f in files if f.category == CATEGORY_ORCHESTRATION],
+        skill_files=[f for f in files if f.category == CATEGORY_SKILL],
+        oversized_context=[f for f in context_files if f.estimated_tokens > OVERSIZED_CONTEXT_TOKENS],
+    )
 
-    insufficient = len(parsed) < MIN_TEXT_FILES_FOR_VALID_SCAN
 
+@dataclass
+class _Detections:
+    """Raw output of the four detectors."""
+
+    clusters: list
+    overlap_groups: list
+    blocks: list
+    review: dict
+    arch: dict
+
+
+def _detect_all(files: list) -> _Detections:
     clusters, overlap_groups = detect_near_duplicates(files)
-    blocks = detect_repeated_blocks(files)
-    review = detect_review_stages(files)
-    arch = detect_architecture(files)
+    return _Detections(
+        clusters=clusters,
+        overlap_groups=overlap_groups,
+        blocks=detect_repeated_blocks(files),
+        review=detect_review_stages(files),
+        arch=detect_architecture(files),
+    )
 
-    oversized_context = [f for f in context_files if f.estimated_tokens > OVERSIZED_CONTEXT_TOKENS]
 
-    # ---- penalty counting -------------------------------------------------
-    dup_pairs = 0
+@dataclass
+class _Tier1:
+    """The seven specified penalty rules, each hard-capped by the specification."""
+
+    dup_pairs: int
+    near_dup: int
+    blocks: int
+    oversized: int
+    sprawl_extra: int
+    sprawl: int
+    extra_stages: int
+    review: int
+    micro_mismatch: bool
+    monolith_mismatch: bool
+    micro: int
+    mono: int
+
+
+def _count_duplicate_pairs(clusters: list) -> int:
+    pairs = 0
     for c in clusters:
         agentish = len(c["agent_like_members"])
         if agentish >= 2:
-            dup_pairs += agentish - 1
-    penalty_near_dup = _capped(dup_pairs, "near_duplicate")
-    penalty_blocks = _capped(len(blocks), "repeated_block")
-    penalty_oversized = _capped(len(oversized_context), "oversized_context")
-    sprawl_extra = max(0, len(agent_like) - AGENT_SPRAWL_THRESHOLD)
-    penalty_sprawl = _capped(sprawl_extra, "agent_sprawl")
-    extra_stages = max(0, review["count"] - REVIEW_STAGE_THRESHOLD)
-    penalty_review = _capped(extra_stages, "review_stages")
+            pairs += agentish - 1
+    return pairs
 
+
+def _tier1_penalties(g: _Groups, d: _Detections) -> _Tier1:
+    dup_pairs = _count_duplicate_pairs(d.clusters)
+    sprawl_extra = max(0, len(g.agent_like) - AGENT_SPRAWL_THRESHOLD)
+    extra_stages = max(0, d.review["count"] - REVIEW_STAGE_THRESHOLD)
     micro_mismatch = (
-        arch["service_dir_count"] >= MICROSERVICE_DIR_THRESHOLD
-        and arch["non_generated_source_files"] < MICROSERVICE_SOURCE_FLOOR
+        d.arch["service_dir_count"] >= MICROSERVICE_DIR_THRESHOLD
+        and d.arch["non_generated_source_files"] < MICROSERVICE_SOURCE_FLOOR
     )
     monolith_mismatch = (
-        arch["service_dir_count"] <= 1
-        and len(agent_role) >= MONOLITH_AGENT_ROLE_THRESHOLD
-        and len(overlap_groups) >= 1
+        d.arch["service_dir_count"] <= 1
+        and len(g.agent_role) >= MONOLITH_AGENT_ROLE_THRESHOLD
+        and len(d.overlap_groups) >= 1
     )
-    penalty_micro = PENALTIES["microservice_mismatch"]["points"] if micro_mismatch else 0
-    penalty_mono = PENALTIES["monolith_mismatch"]["points"] if monolith_mismatch else 0
+    return _Tier1(
+        dup_pairs=dup_pairs,
+        near_dup=_capped(dup_pairs, "near_duplicate"),
+        blocks=_capped(len(d.blocks), "repeated_block"),
+        oversized=_capped(len(g.oversized_context), "oversized_context"),
+        sprawl_extra=sprawl_extra,
+        sprawl=_capped(sprawl_extra, "agent_sprawl"),
+        extra_stages=extra_stages,
+        review=_capped(extra_stages, "review_stages"),
+        micro_mismatch=micro_mismatch,
+        monolith_mismatch=monolith_mismatch,
+        micro=PENALTIES["microservice_mismatch"]["points"] if micro_mismatch else 0,
+        mono=PENALTIES["monolith_mismatch"]["points"] if monolith_mismatch else 0,
+    )
 
-    # ---- severity scaling ------------------------------------------------
-    # The seven rules above are hard-capped by the specification. On their own the caps make a
-    # score below ~72 impossible, which would leave the Wasteful and Critical verdicts unreachable.
-    # A second, clearly labelled tier scales with *how much* waste there is rather than how many
-    # times a rule fired. Every value below is deterministic and shown in the score ledger.
-    agent_token_total = max(1, sum(f.estimated_tokens for f in agent_like))
-    redundant_tokens_total = 0
-    for c in clusters:
-        if c["agent_like_members"]:
-            toks = sorted(c["tokens"], reverse=True)
-            redundant_tokens_total += sum(toks[1:])
-    context_excess_tokens = sum(max(0, f.estimated_tokens - OVERSIZED_CONTEXT_TOKENS) for f in context_files)
-    agent_token_list = [f.estimated_tokens for f in agent_like if f.estimated_tokens]
-    median_agent_tokens_pre = int(statistics.median(agent_token_list)) if agent_token_list else 0
 
-    dup_share = redundant_tokens_total / agent_token_total
+class _Money:
+    """Converts token counts into report credits and dollars using the scan assumptions."""
 
-    total_considered = len(files) or 1
-    skip_ratio = inventory.skipped_files / total_considered
-    partial_scan = skip_ratio > PARTIAL_SCAN_SKIP_RATIO
+    def __init__(self, a: dict):
+        self.tokens_per_credit = float(a["tokens_per_report_credit"])
+        self.out_share = float(a["output_token_share"])
+        self.input_per_million = a["input_dollars_per_million"]
+        self.output_per_million = a["output_dollars_per_million"]
 
-    # ---- savings helpers --------------------------------------------------
-    runs = float(a["agent_runs_per_month"])
-    out_share = float(a["output_token_share"])
-    tokens_per_credit = float(a["tokens_per_report_credit"])
+    def credits(self, tokens: float) -> float:
+        return round(tokens / self.tokens_per_credit, 4)
 
-    def to_credits(tokens: float) -> float:
-        return round(tokens / tokens_per_credit, 4)
-
-    def to_dollars(tokens: float) -> float:
-        inp = tokens * (1 - out_share)
-        outp = tokens * out_share
+    def dollars(self, tokens: float) -> float:
+        inp = tokens * (1 - self.out_share)
+        outp = tokens * self.out_share
         return round(
-            inp / 1_000_000 * a["input_dollars_per_million"]
-            + outp / 1_000_000 * a["output_dollars_per_million"],
+            inp / 1_000_000 * self.input_per_million + outp / 1_000_000 * self.output_per_million,
             2,
         )
 
-    agent_tokens = [f.estimated_tokens for f in agent_like if f.estimated_tokens]
-    median_agent_tokens = int(statistics.median(agent_tokens)) if agent_tokens else 0
-    instruction_tokens = [f.estimated_tokens for f in (orchestration_files + agent_role) if f.estimated_tokens]
-    total_instruction_tokens = sum(instruction_tokens)
-    total_agent_like_tokens = sum(agent_tokens)
 
-    issues = []
-    seq = 0
+def _severity_for(tokens: float) -> str:
+    if tokens >= 4_000_000:
+        return "critical"
+    if tokens >= 1_000_000:
+        return "high"
+    if tokens >= 200_000:
+        return "medium"
+    return "low"
 
-    def add_issue(severity, category, title, description, evidence, impacted, monthly_tokens,
-                  recommendation, impact, effort, formula, files_list=None):
-        nonlocal seq
-        seq += 1
+
+class _IssueLog:
+    """Collects findings and assigns their sequential, date-stamped ids."""
+
+    def __init__(self, date_key: str, money: _Money):
+        self.items: list = []
+        self._date_key = date_key
+        self._money = money
+        self._seq = 0
+
+    def add(self, severity, category, title, description, evidence, impacted, monthly_tokens,
+            recommendation, impact, effort, formula, files_list=None) -> None:
+        self._seq += 1
         monthly_tokens = max(0.0, float(monthly_tokens))
-        issues.append({
-            "id": f"ISS-{date_key}-{seq:04d}",
+        self.items.append({
+            "id": f"ISS-{self._date_key}-{self._seq:04d}",
             "severity": severity,
             "category": category,
             "title": title,
@@ -338,251 +387,330 @@ def analyze(inventory: Inventory, assumptions_overrides: dict | None = None, sca
             "impacted_file_count": impacted,
             "impacted_files": files_list or [],
             "estimated_token_waste": int(round(monthly_tokens)),
-            "estimated_credit_waste": to_credits(monthly_tokens),
-            "estimated_dollar_waste": to_dollars(monthly_tokens),
+            "estimated_credit_waste": self._money.credits(monthly_tokens),
+            "estimated_dollar_waste": self._money.dollars(monthly_tokens),
             "recommendation": recommendation,
             "impact": impact,
             "effort": effort,
             "formula": formula,
         })
 
-    def severity_for(tokens: float) -> str:
-        if tokens >= 4_000_000:
-            return "critical"
-        if tokens >= 1_000_000:
-            return "high"
-        if tokens >= 200_000:
-            return "medium"
-        return "low"
 
-    if not insufficient:
-        # 1. duplicate clusters
-        for c in sorted(clusters, key=lambda x: -sum(x["tokens"]))[:80]:
-            tokens_sorted = sorted(c["tokens"], reverse=True)
-            redundant_tokens = sum(tokens_sorted[1:])
-            monthly = redundant_tokens * runs if c["agent_like_members"] else redundant_tokens * runs * 0.25
-            add_issue(
-                severity_for(monthly), "redundancy",
-                f"{len(c['files'])} files are near copies of each other",
-                "These files say almost the same thing. Every time your agents run, the same words get "
-                "sent to the model more than once. Keeping one source of truth removes the repeat cost.",
-                f"Group {c['group_id']} - highest similarity {c['max_similarity'] * 100:.0f}%. "
-                f"Files: {', '.join(_short(p) for p in c['files'][:6])}"
-                + (" ..." if len(c["files"]) > 6 else ""),
-                len(c["files"]), monthly,
-                "Keep the most complete file, delete or shrink the copies, and link to the kept file instead.",
-                "High" if redundant_tokens > 4000 else "Medium",
-                "Small" if len(c["files"]) <= 3 else "Medium",
-                "monthly_waste = (sum of duplicate file tokens - largest file tokens) x runs_per_month",
-                c["files"],
-            )
+@dataclass
+class _Metrics:
+    """Derived token totals shared by the findings, the scoring tiers and the ledger."""
 
-        # 2. repeated instruction blocks
-        for b in blocks[:60]:
-            monthly = b["block_tokens"] * (b["file_count"] - 1) * runs
-            add_issue(
-                severity_for(monthly), "redundancy",
-                f"The same instruction block is pasted into {b['file_count']} files",
-                "One block of instructions has been copied into several agent files. Only one copy is "
-                "needed. The rest is paid for on every run.",
-                f"Block of {b['block_chars']} characters (~{b['block_tokens']} tokens) found in: "
-                + ", ".join(_short(p) for p in b["files"][:6]) + (" ..." if len(b["files"]) > 6 else "")
-                + f" | Sample: \"{b['sample'][:160]}\"",
-                b["file_count"], monthly,
-                "Move the shared block into one file and reference it from the others.",
-                "High" if b["file_count"] >= 5 else "Medium", "Small",
-                "monthly_waste = block_tokens x (files_containing_block - 1) x runs_per_month",
-                b["files"],
-            )
+    runs: float
+    agent_token_total: int
+    redundant_tokens_total: int
+    context_excess_tokens: int
+    median_agent_tokens_pre: int
+    dup_share: float
+    median_agent_tokens: int
+    total_instruction_tokens: int
+    total_agent_like_tokens: int
 
-        # 3. oversized context/memory files
-        for f in sorted(oversized_context, key=lambda x: -x.estimated_tokens)[:40]:
-            excess = f.estimated_tokens - OVERSIZED_CONTEXT_TOKENS
-            monthly = excess * runs
-            add_issue(
-                severity_for(monthly), "token_bloat",
-                f"Context file is very large: {os.path.basename(f.path)}",
-                "This memory or context file is bigger than a healthy working budget. Large context files "
-                "are re-read on every run, so most of the cost is paid again and again.",
-                f"{f.path} is about {f.estimated_tokens:,} tokens which is {excess:,} tokens over the "
-                f"{OVERSIZED_CONTEXT_TOKENS:,} token guideline.",
-                1, monthly,
-                "Split this file into a short always-on summary plus detail files that load only when needed.",
-                "High" if excess > 20000 else "Medium",
-                "Medium",
-                f"monthly_waste = (file_tokens - {OVERSIZED_CONTEXT_TOKENS}) x runs_per_month",
-                [f.path],
-            )
 
-        # 4. agent sprawl
-        if sprawl_extra > 0:
-            monthly = sprawl_extra * median_agent_tokens * runs
-            add_issue(
-                severity_for(monthly), "agent_sprawl",
-                f"{len(agent_like)} agent-style files is more than this repo needs",
-                "There are many separate agent, skill and prompt files. Each one adds instructions that "
-                "have to be loaded and kept in sync. Fewer, clearer files cost less and break less often.",
-                f"{len(agent_like)} agent-like files detected against a healthy guideline of "
-                f"{AGENT_SPRAWL_THRESHOLD}. Median agent file size is {median_agent_tokens:,} tokens.",
-                len(agent_like), monthly,
-                "Group agents by job. Merge the ones that overlap and delete the ones nobody calls.",
-                "High" if sprawl_extra > 10 else "Medium", "Large",
-                "monthly_waste = extra_agent_files x median_agent_tokens x runs_per_month",
-                [f.path for f in agent_like[:25]],
-            )
+def _compute_metrics(g: _Groups, d: _Detections, runs: float) -> _Metrics:
+    agent_token_total = max(1, sum(f.estimated_tokens for f in g.agent_like))
+    redundant_tokens_total = 0
+    for c in d.clusters:
+        if c["agent_like_members"]:
+            toks = sorted(c["tokens"], reverse=True)
+            redundant_tokens_total += sum(toks[1:])
+    agent_tokens = [f.estimated_tokens for f in g.agent_like if f.estimated_tokens]
+    median_agent_tokens = int(statistics.median(agent_tokens)) if agent_tokens else 0
+    instruction_tokens = [
+        f.estimated_tokens for f in (g.orchestration_files + g.agent_role) if f.estimated_tokens
+    ]
+    return _Metrics(
+        runs=runs,
+        agent_token_total=agent_token_total,
+        redundant_tokens_total=redundant_tokens_total,
+        context_excess_tokens=sum(
+            max(0, f.estimated_tokens - OVERSIZED_CONTEXT_TOKENS) for f in g.context_files),
+        median_agent_tokens_pre=median_agent_tokens,
+        dup_share=redundant_tokens_total / agent_token_total,
+        median_agent_tokens=median_agent_tokens,
+        total_instruction_tokens=sum(instruction_tokens),
+        total_agent_like_tokens=sum(agent_tokens),
+    )
 
-        # 5. review overhead
-        if extra_stages > 0:
-            monthly = extra_stages * total_instruction_tokens * runs * 0.25
-            add_issue(
-                severity_for(monthly), "review_overhead",
-                f"{review['count']} separate review or approval steps were found",
-                "Your instructions describe many checks before work is accepted. Each extra check means "
-                "another pass over the same material, which costs time and money.",
-                "Stages inferred: " + ", ".join(review["stages"]) + ". Examples: "
-                + "; ".join(f"{s} -> {_short(v[0])}" for s, v in list(review["evidence"].items())[:4] if v),
-                len({p for v in review["evidence"].values() for p in v}), monthly,
-                "Keep at most four review gates. Combine the overlapping ones into a single checklist.",
-                "Medium" if extra_stages <= 2 else "High", "Medium",
-                "monthly_waste = extra_review_stages x total_instruction_tokens x runs_per_month x 0.25",
-                sorted({p for v in review["evidence"].values() for p in v})[:20],
-            )
 
-        # 6. architecture mismatches
-        if micro_mismatch:
-            monthly = 0.05 * total_agent_like_tokens * runs
-            add_issue(
-                "high", "architecture_inefficiency",
-                "Split into many services but there is little code in them",
-                "The repo is arranged as many small services, yet the amount of real code is small. "
-                "Each service still needs its own setup and its own instructions, so the overhead is "
-                "larger than the work being done.",
-                f"{arch['service_dir_count']} service directories detected with only "
-                f"{arch['non_generated_source_files']} hand written source files.",
-                arch["service_dir_count"], monthly,
-                "Fold the thin services back together until each one has a clear, separate job.",
-                "High", "Large",
-                "monthly_waste = 5% x total_agent_asset_tokens x runs_per_month",
-                arch["service_dirs"][:20],
-            )
-        if monolith_mismatch:
-            monthly = 0.05 * sum(f.estimated_tokens for f in agent_role) * runs
-            add_issue(
-                "medium", "architecture_inefficiency",
-                "One service is carrying many overlapping agent roles",
-                "Everything lives in a single service, but there are many agent role files that describe "
-                "similar work. That makes it hard to tell which agent owns what, and the same guidance "
-                "gets repeated.",
-                f"{len(agent_role)} agent role files with {len(overlap_groups)} overlapping groups inside "
-                f"{arch['service_dir_count']} service directory.",
-                len(agent_role), monthly,
-                "Give each agent one clear job and remove duplicated role descriptions.",
-                "Medium", "Medium",
-                "monthly_waste = 5% x total_agent_role_tokens x runs_per_month",
-                [f.path for f in agent_role[:20]],
-            )
+@dataclass
+class _Findings:
+    """Bundle passed to each finding builder."""
 
-        # 7. repetitive skills
-        dup_skill_paths = {p for c in clusters for p in c["files"] if "/skills/" in "/" + p.lower() or p.lower().endswith(".skill.md")}
-        if len(skill_files) > 10 or len(dup_skill_paths) >= 2:
-            dup_tokens = sum(f.estimated_tokens for f in skill_files if f.path in dup_skill_paths)
-            monthly = (dup_tokens or max(0, len(skill_files) - 10) * median_agent_tokens) * runs * 0.5
-            add_issue(
-                severity_for(monthly), "agent_sprawl",
-                f"{len(skill_files)} skill files, and some repeat each other",
-                "Skill files are meant to be small and specific. When there are many of them and they "
-                "repeat, the model reads the same guidance several times.",
-                f"{len(skill_files)} skill files detected; {len(dup_skill_paths)} of them sit inside "
-                f"near-duplicate groups.",
-                max(len(skill_files), len(dup_skill_paths)), monthly,
-                "Keep one skill file per capability and delete the near copies.",
-                "Medium", "Small",
-                "monthly_waste = duplicated_skill_tokens x runs_per_month x 0.5",
-                sorted(dup_skill_paths)[:20] or [f.path for f in skill_files[:20]],
-            )
+    g: _Groups
+    d: _Detections
+    t1: _Tier1
+    m: _Metrics
 
-        # 8. orchestration layers
-        if len(orchestration_files) > 6:
-            layers = len(orchestration_files)
-            avg_orch = int(statistics.mean([f.estimated_tokens for f in orchestration_files if f.estimated_tokens] or [0]))
-            monthly = (layers - 6) * avg_orch * runs * 0.5
-            add_issue(
-                severity_for(monthly), "review_overhead",
-                f"{layers} orchestration files create extra hand-offs",
-                "There are many files describing how work moves between agents. Every hand-off adds "
-                "instructions that must be loaded and kept in step with the others.",
-                f"{layers} orchestration or prompt files detected, average size {avg_orch:,} tokens.",
-                layers, monthly,
-                "Describe the flow once in a single orchestrator file and let the agents stay simple.",
-                "Medium", "Medium",
-                "monthly_waste = (orchestration_files - 6) x avg_orchestration_tokens x runs_per_month x 0.5",
-                [f.path for f in orchestration_files[:20]],
-            )
 
-    issues.sort(key=lambda i: -i["estimated_token_waste"])
+# ------------------------------------------------------------ finding builders
+def _find_duplicate_clusters(f: _Findings, add) -> None:
+    for c in sorted(f.d.clusters, key=lambda x: -sum(x["tokens"]))[:80]:
+        tokens_sorted = sorted(c["tokens"], reverse=True)
+        redundant_tokens = sum(tokens_sorted[1:])
+        monthly = (redundant_tokens * f.m.runs if c["agent_like_members"]
+                   else redundant_tokens * f.m.runs * 0.25)
+        add(
+            _severity_for(monthly), "redundancy",
+            f"{len(c['files'])} files are near copies of each other",
+            "These files say almost the same thing. Every time your agents run, the same words get "
+            "sent to the model more than once. Keeping one source of truth removes the repeat cost.",
+            f"Group {c['group_id']} - highest similarity {c['max_similarity'] * 100:.0f}%. "
+            f"Files: {', '.join(_short(p) for p in c['files'][:6])}"
+            + (" ..." if len(c["files"]) > 6 else ""),
+            len(c["files"]), monthly,
+            "Keep the most complete file, delete or shrink the copies, and link to the kept file instead.",
+            "High" if redundant_tokens > 4000 else "Medium",
+            "Small" if len(c["files"]) <= 3 else "Medium",
+            "monthly_waste = (sum of duplicate file tokens - largest file tokens) x runs_per_month",
+            c["files"],
+        )
 
-    # ---- tier 2: severity scaling (see compute_tier2_scaling above) ------
-    tier2 = compute_tier2_scaling(issues, agent_token_total, runs, insufficient)
-    monthly_agent_budget = tier2.monthly_agent_budget
-    waste_by_category = tier2.waste_by_category
-    waste_shares = tier2.waste_shares
-    scale_penalties = tier2.penalties
 
-    cat_penalties = {
-        "redundancy": penalty_near_dup + penalty_blocks + scale_penalties["redundancy"],
-        "token_bloat": penalty_oversized + scale_penalties["token_bloat"],
-        "review_overhead": penalty_review + scale_penalties["review_overhead"],
-        "agent_sprawl": penalty_sprawl + scale_penalties["agent_sprawl"],
-        "architecture_inefficiency": penalty_micro + penalty_mono + scale_penalties["architecture_inefficiency"],
+def _find_repeated_blocks(f: _Findings, add) -> None:
+    for b in f.d.blocks[:60]:
+        monthly = b["block_tokens"] * (b["file_count"] - 1) * f.m.runs
+        add(
+            _severity_for(monthly), "redundancy",
+            f"The same instruction block is pasted into {b['file_count']} files",
+            "One block of instructions has been copied into several agent files. Only one copy is "
+            "needed. The rest is paid for on every run.",
+            f"Block of {b['block_chars']} characters (~{b['block_tokens']} tokens) found in: "
+            + ", ".join(_short(p) for p in b["files"][:6]) + (" ..." if len(b["files"]) > 6 else "")
+            + f" | Sample: \"{b['sample'][:160]}\"",
+            b["file_count"], monthly,
+            "Move the shared block into one file and reference it from the others.",
+            "High" if b["file_count"] >= 5 else "Medium", "Small",
+            "monthly_waste = block_tokens x (files_containing_block - 1) x runs_per_month",
+            b["files"],
+        )
+
+
+def _find_oversized_context(f: _Findings, add) -> None:
+    for rec in sorted(f.g.oversized_context, key=lambda x: -x.estimated_tokens)[:40]:
+        excess = rec.estimated_tokens - OVERSIZED_CONTEXT_TOKENS
+        monthly = excess * f.m.runs
+        add(
+            _severity_for(monthly), "token_bloat",
+            f"Context file is very large: {os.path.basename(rec.path)}",
+            "This memory or context file is bigger than a healthy working budget. Large context files "
+            "are re-read on every run, so most of the cost is paid again and again.",
+            f"{rec.path} is about {rec.estimated_tokens:,} tokens which is {excess:,} tokens over the "
+            f"{OVERSIZED_CONTEXT_TOKENS:,} token guideline.",
+            1, monthly,
+            "Split this file into a short always-on summary plus detail files that load only when needed.",
+            "High" if excess > 20000 else "Medium",
+            "Medium",
+            f"monthly_waste = (file_tokens - {OVERSIZED_CONTEXT_TOKENS}) x runs_per_month",
+            [rec.path],
+        )
+
+
+def _find_agent_sprawl(f: _Findings, add) -> None:
+    if f.t1.sprawl_extra <= 0:
+        return
+    monthly = f.t1.sprawl_extra * f.m.median_agent_tokens * f.m.runs
+    add(
+        _severity_for(monthly), "agent_sprawl",
+        f"{len(f.g.agent_like)} agent-style files is more than this repo needs",
+        "There are many separate agent, skill and prompt files. Each one adds instructions that "
+        "have to be loaded and kept in sync. Fewer, clearer files cost less and break less often.",
+        f"{len(f.g.agent_like)} agent-like files detected against a healthy guideline of "
+        f"{AGENT_SPRAWL_THRESHOLD}. Median agent file size is {f.m.median_agent_tokens:,} tokens.",
+        len(f.g.agent_like), monthly,
+        "Group agents by job. Merge the ones that overlap and delete the ones nobody calls.",
+        "High" if f.t1.sprawl_extra > 10 else "Medium", "Large",
+        "monthly_waste = extra_agent_files x median_agent_tokens x runs_per_month",
+        [rec.path for rec in f.g.agent_like[:25]],
+    )
+
+
+def _find_review_overhead(f: _Findings, add) -> None:
+    if f.t1.extra_stages <= 0:
+        return
+    review = f.d.review
+    monthly = f.t1.extra_stages * f.m.total_instruction_tokens * f.m.runs * 0.25
+    add(
+        _severity_for(monthly), "review_overhead",
+        f"{review['count']} separate review or approval steps were found",
+        "Your instructions describe many checks before work is accepted. Each extra check means "
+        "another pass over the same material, which costs time and money.",
+        "Stages inferred: " + ", ".join(review["stages"]) + ". Examples: "
+        + "; ".join(f"{s} -> {_short(v[0])}" for s, v in list(review["evidence"].items())[:4] if v),
+        len({p for v in review["evidence"].values() for p in v}), monthly,
+        "Keep at most four review gates. Combine the overlapping ones into a single checklist.",
+        "Medium" if f.t1.extra_stages <= 2 else "High", "Medium",
+        "monthly_waste = extra_review_stages x total_instruction_tokens x runs_per_month x 0.25",
+        sorted({p for v in review["evidence"].values() for p in v})[:20],
+    )
+
+
+def _find_architecture(f: _Findings, add) -> None:
+    arch = f.d.arch
+    if f.t1.micro_mismatch:
+        monthly = 0.05 * f.m.total_agent_like_tokens * f.m.runs
+        add(
+            "high", "architecture_inefficiency",
+            "Split into many services but there is little code in them",
+            "The repo is arranged as many small services, yet the amount of real code is small. "
+            "Each service still needs its own setup and its own instructions, so the overhead is "
+            "larger than the work being done.",
+            f"{arch['service_dir_count']} service directories detected with only "
+            f"{arch['non_generated_source_files']} hand written source files.",
+            arch["service_dir_count"], monthly,
+            "Fold the thin services back together until each one has a clear, separate job.",
+            "High", "Large",
+            "monthly_waste = 5% x total_agent_asset_tokens x runs_per_month",
+            arch["service_dirs"][:20],
+        )
+    if f.t1.monolith_mismatch:
+        monthly = 0.05 * sum(rec.estimated_tokens for rec in f.g.agent_role) * f.m.runs
+        add(
+            "medium", "architecture_inefficiency",
+            "One service is carrying many overlapping agent roles",
+            "Everything lives in a single service, but there are many agent role files that describe "
+            "similar work. That makes it hard to tell which agent owns what, and the same guidance "
+            "gets repeated.",
+            f"{len(f.g.agent_role)} agent role files with {len(f.d.overlap_groups)} overlapping groups inside "
+            f"{arch['service_dir_count']} service directory.",
+            len(f.g.agent_role), monthly,
+            "Give each agent one clear job and remove duplicated role descriptions.",
+            "Medium", "Medium",
+            "monthly_waste = 5% x total_agent_role_tokens x runs_per_month",
+            [rec.path for rec in f.g.agent_role[:20]],
+        )
+
+
+def _find_repetitive_skills(f: _Findings, add) -> None:
+    skill_files = f.g.skill_files
+    dup_skill_paths = {
+        p for c in f.d.clusters for p in c["files"]
+        if "/skills/" in "/" + p.lower() or p.lower().endswith(".skill.md")
     }
-    cat_scores = {k: max(0, min(100, 100 - v)) for k, v in cat_penalties.items()}
-    overall = int(round(sum(cat_scores[k] * w for k, w in CATEGORY_WEIGHTS.items())))
-    overall = max(0, min(100, overall))
-    verdict = verdict_for_score(overall)
+    if not (len(skill_files) > 10 or len(dup_skill_paths) >= 2):
+        return
+    dup_tokens = sum(rec.estimated_tokens for rec in skill_files if rec.path in dup_skill_paths)
+    monthly = (dup_tokens or max(0, len(skill_files) - 10) * f.m.median_agent_tokens) * f.m.runs * 0.5
+    add(
+        _severity_for(monthly), "agent_sprawl",
+        f"{len(skill_files)} skill files, and some repeat each other",
+        "Skill files are meant to be small and specific. When there are many of them and they "
+        "repeat, the model reads the same guidance several times.",
+        f"{len(skill_files)} skill files detected; {len(dup_skill_paths)} of them sit inside "
+        f"near-duplicate groups.",
+        max(len(skill_files), len(dup_skill_paths)), monthly,
+        "Keep one skill file per capability and delete the near copies.",
+        "Medium", "Small",
+        "monthly_waste = duplicated_skill_tokens x runs_per_month x 0.5",
+        sorted(dup_skill_paths)[:20] or [rec.path for rec in skill_files[:20]],
+    )
 
+
+def _find_orchestration_layers(f: _Findings, add) -> None:
+    orchestration_files = f.g.orchestration_files
+    if len(orchestration_files) <= 6:
+        return
+    layers = len(orchestration_files)
+    avg_orch = int(statistics.mean(
+        [rec.estimated_tokens for rec in orchestration_files if rec.estimated_tokens] or [0]))
+    monthly = (layers - 6) * avg_orch * f.m.runs * 0.5
+    add(
+        _severity_for(monthly), "review_overhead",
+        f"{layers} orchestration files create extra hand-offs",
+        "There are many files describing how work moves between agents. Every hand-off adds "
+        "instructions that must be loaded and kept in step with the others.",
+        f"{layers} orchestration or prompt files detected, average size {avg_orch:,} tokens.",
+        layers, monthly,
+        "Describe the flow once in a single orchestrator file and let the agents stay simple.",
+        "Medium", "Medium",
+        "monthly_waste = (orchestration_files - 6) x avg_orchestration_tokens x runs_per_month x 0.5",
+        [rec.path for rec in orchestration_files[:20]],
+    )
+
+
+# Order matters: issue ids are assigned sequentially as these run.
+FINDING_BUILDERS = (
+    _find_duplicate_clusters,
+    _find_repeated_blocks,
+    _find_oversized_context,
+    _find_agent_sprawl,
+    _find_review_overhead,
+    _find_architecture,
+    _find_repetitive_skills,
+    _find_orchestration_layers,
+)
+
+
+def _collect_issues(findings: _Findings, log: _IssueLog, insufficient: bool) -> list:
+    if not insufficient:
+        for builder in FINDING_BUILDERS:
+            builder(findings, log.add)
+    log.items.sort(key=lambda i: -i["estimated_token_waste"])
+    return log.items
+
+
+# ------------------------------------------------------------ result assembly
+def _category_penalties(t1: _Tier1, scale: dict) -> dict:
+    return {
+        "redundancy": t1.near_dup + t1.blocks + scale["redundancy"],
+        "token_bloat": t1.oversized + scale["token_bloat"],
+        "review_overhead": t1.review + scale["review_overhead"],
+        "agent_sprawl": t1.sprawl + scale["agent_sprawl"],
+        "architecture_inefficiency": t1.micro + t1.mono + scale["architecture_inefficiency"],
+    }
+
+
+def _build_savings(issues: list, money: _Money, variance: float, insufficient: bool) -> dict:
     total_tokens_waste = sum(i["estimated_token_waste"] for i in issues)
     total_dollars = round(sum(i["estimated_dollar_waste"] for i in issues), 2)
-    variance = float(a["variance_pct"])
+    credits = money.credits(total_tokens_waste)
     savings = {
         "estimated_monthly_token_waste": int(total_tokens_waste),
-        "estimated_monthly_credit_waste": to_credits(total_tokens_waste),
+        "estimated_monthly_credit_waste": credits,
         "estimated_monthly_dollar_waste": total_dollars,
         "estimated_savings_low": round(total_dollars * (1 - variance), 2),
         "estimated_savings_high": round(total_dollars * (1 + variance), 2),
-        "estimated_credit_savings_low": round(to_credits(total_tokens_waste) * (1 - variance), 2),
-        "estimated_credit_savings_high": round(to_credits(total_tokens_waste) * (1 + variance), 2),
+        "estimated_credit_savings_low": round(credits * (1 - variance), 2),
+        "estimated_credit_savings_high": round(credits * (1 + variance), 2),
     }
     if insufficient:
-        savings = {k: 0 for k in savings}
+        return {k: 0 for k in savings}
+    return savings
 
-    category_scores = []
+
+def _build_category_scores(g: _Groups, d: _Detections, cat_scores: dict, cat_penalties: dict) -> list:
     summaries = {
         "redundancy": (
-            f"{len(clusters)} groups of near-identical files and {len(blocks)} repeated instruction "
+            f"{len(d.clusters)} groups of near-identical files and {len(d.blocks)} repeated instruction "
             f"blocks were found."
         ),
         "token_bloat": (
-            f"{len(oversized_context)} context or memory files are over "
+            f"{len(g.oversized_context)} context or memory files are over "
             f"{OVERSIZED_CONTEXT_TOKENS:,} tokens."
         ),
-        "review_overhead": f"{review['count']} review or approval steps were inferred from your instructions.",
-        "agent_sprawl": f"{len(agent_like)} agent-style files were found ({len(agent_role)} agent roles, {len(skill_files)} skills).",
+        "review_overhead": f"{d.review['count']} review or approval steps were inferred from your instructions.",
+        "agent_sprawl": f"{len(g.agent_like)} agent-style files were found ({len(g.agent_role)} agent roles, {len(g.skill_files)} skills).",
         "architecture_inefficiency": (
-            f"{arch['service_dir_count']} service directories against "
-            f"{arch['non_generated_source_files']} hand written source files."
+            f"{d.arch['service_dir_count']} service directories against "
+            f"{d.arch['non_generated_source_files']} hand written source files."
         ),
     }
-    for key in CATEGORY_WEIGHTS:
-        category_scores.append({
-            "category": key,
-            "label": CATEGORY_LABELS[key],
-            "score": cat_scores[key],
-            "penalty_points": cat_penalties[key],
-            "weight": CATEGORY_WEIGHTS[key],
-            "summary": summaries[key],
-        })
+    return [{
+        "category": key,
+        "label": CATEGORY_LABELS[key],
+        "score": cat_scores[key],
+        "penalty_points": cat_penalties[key],
+        "weight": CATEGORY_WEIGHTS[key],
+        "summary": summaries[key],
+    } for key in CATEGORY_WEIGHTS]
 
-    top_drivers = [{
+
+def _build_top_drivers(issues: list) -> list:
+    return [{
         "rank": i + 1,
         "title": iss["title"],
         "plain_language": iss["description"],
@@ -593,15 +721,19 @@ def analyze(inventory: Inventory, assumptions_overrides: dict | None = None, sca
         "issue_id": iss["id"],
     } for i, iss in enumerate(issues[:5])]
 
+
+def _build_actions(issues: list) -> list:
     impact_rank = {"High": 0, "Medium": 1, "Low": 2}
     effort_rank = {"Small": 0, "Medium": 1, "Large": 2}
-    seen_titles = set()
-    actions = []
-    for iss in sorted(issues, key=lambda x: (impact_rank.get(x["impact"], 3), effort_rank.get(x["effort"], 3), -x["estimated_token_waste"])):
+    seen: set = set()
+    actions: list = []
+    ordered = sorted(issues, key=lambda x: (
+        impact_rank.get(x["impact"], 3), effort_rank.get(x["effort"], 3), -x["estimated_token_waste"]))
+    for iss in ordered:
         key = (iss["category"], iss["recommendation"])
-        if key in seen_titles:
+        if key in seen:
             continue
-        seen_titles.add(key)
+        seen.add(key)
         actions.append({
             "issue_id": iss["id"],
             "action": iss["recommendation"],
@@ -614,67 +746,112 @@ def analyze(inventory: Inventory, assumptions_overrides: dict | None = None, sca
         })
         if len(actions) >= 20:
             break
+    return actions
 
-    penalty_ledger = [
-        {"rule": "Near-duplicate agent/context file pair (similarity >= 0.80)", "hits": dup_pairs,
-         "points_each": 5, "cap": 32, "applied": penalty_near_dup, "category": "redundancy"},
+
+def _tier1_ledger(g: _Groups, d: _Detections, t1: _Tier1) -> list:
+    return [
+        {"rule": "Near-duplicate agent/context file pair (similarity >= 0.80)", "hits": t1.dup_pairs,
+         "points_each": 5, "cap": 32, "applied": t1.near_dup, "category": "redundancy"},
         {"rule": f"Repeated instruction block >= {REPEATED_BLOCK_MIN_CHARS} chars in {REPEATED_BLOCK_MIN_FILES}+ files",
-         "hits": len(blocks), "points_each": 4, "cap": 20, "applied": penalty_blocks, "category": "redundancy"},
-        {"rule": f"Context or memory file over {OVERSIZED_CONTEXT_TOKENS:,} tokens", "hits": len(oversized_context),
-         "points_each": 6, "cap": 24, "applied": penalty_oversized, "category": "token_bloat"},
-        {"rule": f"Agent-like files above {AGENT_SPRAWL_THRESHOLD}", "hits": sprawl_extra,
-         "points_each": 2, "cap": 20, "applied": penalty_sprawl, "category": "agent_sprawl"},
-        {"rule": f"Review/approval stages above {REVIEW_STAGE_THRESHOLD}", "hits": extra_stages,
-         "points_each": 5, "cap": 15, "applied": penalty_review, "category": "review_overhead"},
+         "hits": len(d.blocks), "points_each": 4, "cap": 20, "applied": t1.blocks, "category": "redundancy"},
+        {"rule": f"Context or memory file over {OVERSIZED_CONTEXT_TOKENS:,} tokens",
+         "hits": len(g.oversized_context),
+         "points_each": 6, "cap": 24, "applied": t1.oversized, "category": "token_bloat"},
+        {"rule": f"Agent-like files above {AGENT_SPRAWL_THRESHOLD}", "hits": t1.sprawl_extra,
+         "points_each": 2, "cap": 20, "applied": t1.sprawl, "category": "agent_sprawl"},
+        {"rule": f"Review/approval stages above {REVIEW_STAGE_THRESHOLD}", "hits": t1.extra_stages,
+         "points_each": 5, "cap": 15, "applied": t1.review, "category": "review_overhead"},
         {"rule": f"Microservice mismatch (>= {MICROSERVICE_DIR_THRESHOLD} service dirs and < {MICROSERVICE_SOURCE_FLOOR} source files)",
-         "hits": 1 if micro_mismatch else 0, "points_each": 12, "cap": 12, "applied": penalty_micro,
+         "hits": 1 if t1.micro_mismatch else 0, "points_each": 12, "cap": 12, "applied": t1.micro,
          "category": "architecture_inefficiency"},
         {"rule": f"Monolith mismatch (1 service and >= {MONOLITH_AGENT_ROLE_THRESHOLD} overlapping agent roles)",
-         "hits": 1 if monolith_mismatch else 0, "points_each": 10, "cap": 10, "applied": penalty_mono,
+         "hits": 1 if t1.monolith_mismatch else 0, "points_each": 10, "cap": 10, "applied": t1.mono,
          "category": "architecture_inefficiency"},
-        {"rule": "Severity scaling - share of the monthly agent context budget wasted by duplication",
-         "hits": int(round(waste_shares["redundancy"] * 100)), "points_each": 0,
-         "cap": SCALE_CAPS["redundancy"], "applied": scale_penalties["redundancy"],
-         "category": "redundancy", "tier": "scaling",
-         "detail": f"{waste_by_category.get('redundancy', 0):,} of {int(monthly_agent_budget):,} monthly "
-                   f"agent context tokens ({waste_shares['redundancy'] * 100:.1f}%); "
-                   f"{dup_share * 100:.1f}% of agent files are duplicated copies"},
-        {"rule": "Severity scaling - share of the monthly agent context budget wasted by oversized files",
-         "hits": int(round(waste_shares["token_bloat"] * 100)), "points_each": 0,
-         "cap": SCALE_CAPS["token_bloat"], "applied": scale_penalties["token_bloat"],
-         "category": "token_bloat", "tier": "scaling",
-         "detail": f"{context_excess_tokens:,} tokens over the context guideline; median agent file "
-                   f"{median_agent_tokens_pre:,} tokens; "
-                   f"{waste_shares['token_bloat'] * 100:.1f}% of the monthly budget"},
-        {"rule": "Severity scaling - share of the monthly agent context budget wasted on review loops",
-         "hits": int(round(waste_shares["review_overhead"] * 100)), "points_each": 0,
-         "cap": SCALE_CAPS["review_overhead"], "applied": scale_penalties["review_overhead"],
-         "category": "review_overhead", "tier": "scaling",
-         "detail": f"{review['count']} review stages, {len(orchestration_files)} orchestration files, "
-                   f"{waste_shares['review_overhead'] * 100:.1f}% of the monthly budget"},
-        {"rule": "Severity scaling - share of the monthly agent context budget wasted on extra agents",
-         "hits": int(round(waste_shares["agent_sprawl"] * 100)), "points_each": 0,
-         "cap": SCALE_CAPS["agent_sprawl"], "applied": scale_penalties["agent_sprawl"],
-         "category": "agent_sprawl", "tier": "scaling",
-         "detail": f"{len(agent_like)} agent-like files, "
-                   f"{waste_shares['agent_sprawl'] * 100:.1f}% of the monthly budget"},
-        {"rule": "Severity scaling - share of the monthly agent context budget lost to the architecture",
-         "hits": int(round(waste_shares["architecture_inefficiency"] * 100)), "points_each": 0,
-         "cap": SCALE_CAPS["architecture_inefficiency"],
-         "applied": scale_penalties["architecture_inefficiency"],
-         "category": "architecture_inefficiency", "tier": "scaling",
-         "detail": f"{arch['service_dir_count']} service dirs, {len(overlap_groups)} overlapping groups, "
-                   f"{waste_shares['architecture_inefficiency'] * 100:.1f}% of the monthly budget"},
     ]
-    for row in penalty_ledger:
+
+
+def _tier2_ledger(g: _Groups, d: _Detections, m: _Metrics, tier2) -> list:
+    shares = tier2.waste_shares
+    applied = tier2.penalties
+    by_cat = tier2.waste_by_category
+    budget = tier2.monthly_agent_budget
+    return [
+        {"rule": "Severity scaling - share of the monthly agent context budget wasted by duplication",
+         "hits": int(round(shares["redundancy"] * 100)), "points_each": 0,
+         "cap": SCALE_CAPS["redundancy"], "applied": applied["redundancy"],
+         "category": "redundancy", "tier": "scaling",
+         "detail": f"{by_cat.get('redundancy', 0):,} of {int(budget):,} monthly "
+                   f"agent context tokens ({shares['redundancy'] * 100:.1f}%); "
+                   f"{m.dup_share * 100:.1f}% of agent files are duplicated copies"},
+        {"rule": "Severity scaling - share of the monthly agent context budget wasted by oversized files",
+         "hits": int(round(shares["token_bloat"] * 100)), "points_each": 0,
+         "cap": SCALE_CAPS["token_bloat"], "applied": applied["token_bloat"],
+         "category": "token_bloat", "tier": "scaling",
+         "detail": f"{m.context_excess_tokens:,} tokens over the context guideline; median agent file "
+                   f"{m.median_agent_tokens_pre:,} tokens; "
+                   f"{shares['token_bloat'] * 100:.1f}% of the monthly budget"},
+        {"rule": "Severity scaling - share of the monthly agent context budget wasted on review loops",
+         "hits": int(round(shares["review_overhead"] * 100)), "points_each": 0,
+         "cap": SCALE_CAPS["review_overhead"], "applied": applied["review_overhead"],
+         "category": "review_overhead", "tier": "scaling",
+         "detail": f"{d.review['count']} review stages, {len(g.orchestration_files)} orchestration files, "
+                   f"{shares['review_overhead'] * 100:.1f}% of the monthly budget"},
+        {"rule": "Severity scaling - share of the monthly agent context budget wasted on extra agents",
+         "hits": int(round(shares["agent_sprawl"] * 100)), "points_each": 0,
+         "cap": SCALE_CAPS["agent_sprawl"], "applied": applied["agent_sprawl"],
+         "category": "agent_sprawl", "tier": "scaling",
+         "detail": f"{len(g.agent_like)} agent-like files, "
+                   f"{shares['agent_sprawl'] * 100:.1f}% of the monthly budget"},
+        {"rule": "Severity scaling - share of the monthly agent context budget lost to the architecture",
+         "hits": int(round(shares["architecture_inefficiency"] * 100)), "points_each": 0,
+         "cap": SCALE_CAPS["architecture_inefficiency"],
+         "applied": applied["architecture_inefficiency"],
+         "category": "architecture_inefficiency", "tier": "scaling",
+         "detail": f"{d.arch['service_dir_count']} service dirs, {len(d.overlap_groups)} overlapping groups, "
+                   f"{shares['architecture_inefficiency'] * 100:.1f}% of the monthly budget"},
+    ]
+
+
+def _build_penalty_ledger(g: _Groups, d: _Detections, t1: _Tier1, m: _Metrics, tier2) -> list:
+    ledger = _tier1_ledger(g, d, t1) + _tier2_ledger(g, d, m, tier2)
+    for row in ledger:
         row.setdefault("tier", "specified")
         row.setdefault("detail", "")
+    return ledger
 
-    rates = {
-        "input_dollars_per_million": a["input_dollars_per_million"],
-        "output_dollars_per_million": a["output_dollars_per_million"],
-    }
-    assumptions_block = {
+
+def _assumption_notes(a: dict, m: _Metrics, variance: float, out_share: float,
+                      monthly_agent_budget: float) -> list:
+    return [
+        TOKEN_FORMULA,
+        f"Report credits: 1 credit = {int(a['tokens_per_report_credit']):,} tokens.",
+        f"Vendor billing: $1.00 = {a['vendor_credits_per_dollar']:.0f} vendor credits; "
+        f"1 vendor credit = {int(a['input_tokens_per_vendor_credit']):,} input tokens "
+        f"or {int(a['output_tokens_per_vendor_credit']):,} output tokens (output costs 5x input).",
+        f"Derived rates: ${a['input_dollars_per_million']:.2f} per 1M input tokens, "
+        f"${a['output_dollars_per_million']:.2f} per 1M output tokens.",
+        f"Waste is assumed to be {int((1 - out_share) * 100)}% input tokens and "
+        f"{int(out_share * 100)}% output tokens.",
+        f"Each agent asset is assumed to be loaded {int(m.runs)} times per month.",
+        f"Aggregate savings show a +/-{int(variance * 100)}% range.",
+        "Similarity uses normalised text so whitespace-only and case-only changes are ignored.",
+        f"Files under {MIN_CHARS_FOR_SIMILARITY} characters are excluded from duplicate detection.",
+        "Scoring runs in two tiers. Tier 1 is the seven specified penalty rules with their hard "
+        "caps. Tier 2 is severity scaling: for each category we measure the share of the monthly "
+        "agent context budget that the category wastes, and deduct proportionally up to that "
+        "category's tier 2 cap, with a category that wastes 50% or more of the budget taking the "
+        "full deduction. Without tier 2 the capped rules alone could never produce a score below "
+        "about 72, so the Wasteful and Critical bands would be unreachable. Both tiers are "
+        "itemised in the score ledger.",
+        f"Monthly agent context budget for this repository = {int(monthly_agent_budget):,} tokens "
+        f"({m.agent_token_total:,} agent asset tokens x {int(m.runs)} runs per month).",
+    ]
+
+
+def _build_assumptions_block(a: dict, m: _Metrics, variance: float, out_share: float,
+                             monthly_agent_budget: float) -> dict:
+    return {
         "token_formula": TOKEN_FORMULA,
         "similarity_formula": SIMILARITY_FORMULA,
         "tokens_per_report_credit": a["tokens_per_report_credit"],
@@ -686,67 +863,84 @@ def analyze(inventory: Inventory, assumptions_overrides: dict | None = None, sca
         "output_tokens_per_vendor_credit": a["output_tokens_per_vendor_credit"],
         "rates_last_refreshed": a.get("rates_last_refreshed"),
         "rates_source": a.get("rates_source"),
-        **rates,
-        "notes": [
-            TOKEN_FORMULA,
-            f"Report credits: 1 credit = {int(a['tokens_per_report_credit']):,} tokens.",
-            f"Vendor billing: $1.00 = {a['vendor_credits_per_dollar']:.0f} vendor credits; "
-            f"1 vendor credit = {int(a['input_tokens_per_vendor_credit']):,} input tokens "
-            f"or {int(a['output_tokens_per_vendor_credit']):,} output tokens (output costs 5x input).",
-            f"Derived rates: ${rates['input_dollars_per_million']:.2f} per 1M input tokens, "
-            f"${rates['output_dollars_per_million']:.2f} per 1M output tokens.",
-            f"Waste is assumed to be {int((1 - out_share) * 100)}% input tokens and "
-            f"{int(out_share * 100)}% output tokens.",
-            f"Each agent asset is assumed to be loaded {int(runs)} times per month.",
-            f"Aggregate savings show a +/-{int(variance * 100)}% range.",
-            "Similarity uses normalised text so whitespace-only and case-only changes are ignored.",
-            f"Files under {MIN_CHARS_FOR_SIMILARITY} characters are excluded from duplicate detection.",
-            "Scoring runs in two tiers. Tier 1 is the seven specified penalty rules with their hard "
-            "caps. Tier 2 is severity scaling: for each category we measure the share of the monthly "
-            "agent context budget that the category wastes, and deduct proportionally up to that "
-            "category's tier 2 cap, with a category that wastes 50% or more of the budget taking the "
-            "full deduction. Without tier 2 the capped rules alone could never produce a score below "
-            "about 72, so the Wasteful and Critical bands would be unreachable. Both tiers are "
-            "itemised in the score ledger.",
-            f"Monthly agent context budget for this repository = {int(monthly_agent_budget):,} tokens "
-            f"({agent_token_total:,} agent asset tokens x {int(runs)} runs per month).",
-        ],
+        "input_dollars_per_million": a["input_dollars_per_million"],
+        "output_dollars_per_million": a["output_dollars_per_million"],
+        "notes": _assumption_notes(a, m, variance, out_share, monthly_agent_budget),
     }
+
+
+def _build_detections(g: _Groups, d: _Detections, t1: _Tier1) -> dict:
+    return {
+        "duplicate_clusters_found": len(d.clusters),
+        "duplicate_pairs_penalised": t1.dup_pairs,
+        "repeated_block_groups": len(d.blocks),
+        "oversized_context_files": len(g.oversized_context),
+        "overlapping_agent_groups": len(d.overlap_groups),
+        "review_stages_inferred": d.review["count"],
+        "review_stage_names": d.review["stages"],
+        "agent_like_files": len(g.agent_like),
+        "agent_role_files": len(g.agent_role),
+        "skill_files": len(g.skill_files),
+        "context_memory_files": len(g.context_files),
+        "orchestration_files": len(g.orchestration_files),
+        "service_dir_count": d.arch["service_dir_count"],
+        "service_dirs": d.arch["service_dirs"][:40],
+        "non_generated_source_files": d.arch["non_generated_source_files"],
+        "microservice_mismatch": t1.micro_mismatch,
+        "monolith_mismatch": t1.monolith_mismatch,
+    }
+
+
+def analyze(inventory: Inventory, assumptions_overrides: dict | None = None,
+            scan_date: datetime | None = None) -> dict:
+    """Score a repository inventory.
+
+    Runs as a short pipeline: group the files, run the detectors, apply the two penalty tiers,
+    build the findings, then assemble the report payload.
+    """
+    a = merged_assumptions(assumptions_overrides)
+    scan_date = scan_date or datetime.now(timezone.utc)
+    files = inventory.files
+
+    groups = _group_files(files)
+    detections = _detect_all(files)
+    tier1 = _tier1_penalties(groups, detections)
+    money = _Money(a)
+    runs = float(a["agent_runs_per_month"])
+    metrics = _compute_metrics(groups, detections, runs)
+
+    insufficient = len(groups.parsed) < MIN_TEXT_FILES_FOR_VALID_SCAN
+    skip_ratio = inventory.skipped_files / (len(files) or 1)
+    partial_scan = skip_ratio > PARTIAL_SCAN_SKIP_RATIO
+
+    log = _IssueLog(scan_date.strftime("%Y-%m-%d"), money)
+    issues = _collect_issues(_Findings(groups, detections, tier1, metrics), log, insufficient)
+
+    tier2 = compute_tier2_scaling(issues, metrics.agent_token_total, runs, insufficient)
+    cat_penalties = _category_penalties(tier1, tier2.penalties)
+    cat_scores = {k: max(0, min(100, 100 - v)) for k, v in cat_penalties.items()}
+    overall = int(round(sum(cat_scores[k] * w for k, w in CATEGORY_WEIGHTS.items())))
+    overall = max(0, min(100, overall))
+    variance = float(a["variance_pct"])
 
     return {
         "insufficient_data": insufficient,
         "overall_score": 0 if insufficient else overall,
-        "verdict": None if insufficient else verdict,
+        "verdict": None if insufficient else verdict_for_score(overall),
         "partial_scan": partial_scan,
         "skip_ratio": round(skip_ratio, 4),
-        "category_scores": category_scores,
+        "category_scores": _build_category_scores(groups, detections, cat_scores, cat_penalties),
         "issues": issues,
-        "top_drivers": top_drivers,
-        "recommended_actions": actions,
-        "penalty_ledger": penalty_ledger,
-        "assumptions": assumptions_block,
-        "savings": savings,
-        "detections": {
-            "duplicate_clusters_found": len(clusters),
-            "duplicate_pairs_penalised": dup_pairs,
-            "repeated_block_groups": len(blocks),
-            "oversized_context_files": len(oversized_context),
-            "overlapping_agent_groups": len(overlap_groups),
-            "review_stages_inferred": review["count"],
-            "review_stage_names": review["stages"],
-            "agent_like_files": len(agent_like),
-            "agent_role_files": len(agent_role),
-            "skill_files": len(skill_files),
-            "context_memory_files": len(context_files),
-            "orchestration_files": len(orchestration_files),
-            "service_dir_count": arch["service_dir_count"],
-            "service_dirs": arch["service_dirs"][:40],
-            "non_generated_source_files": arch["non_generated_source_files"],
-            "microservice_mismatch": micro_mismatch,
-            "monolith_mismatch": monolith_mismatch,
-        },
+        "top_drivers": _build_top_drivers(issues),
+        "recommended_actions": _build_actions(issues),
+        "penalty_ledger": _build_penalty_ledger(groups, detections, tier1, metrics, tier2),
+        "assumptions": _build_assumptions_block(
+            a, metrics, variance, float(a["output_token_share"]), tier2.monthly_agent_budget),
+        "savings": _build_savings(issues, money, variance, insufficient),
+        "detections": _build_detections(groups, detections, tier1),
         "clusters": [
-            {k: v for k, v in cluster.items() if k != "file_records"} for cluster in clusters[:60]
+            {k: v for k, v in cluster.items() if k != "file_records"}
+            for cluster in detections.clusters[:60]
         ],
-        "overlap_groups": overlap_groups[:40],
+        "overlap_groups": detections.overlap_groups[:40],
     }

@@ -1,0 +1,56 @@
+{
+  "summary": "Iteration 9 testing complete. Verified user-reported 403 bug fix and large refactor regression. All tests pass: (1) Scans work perfectly in preview environment - both zip and GitHub scans complete successfully with no 403 errors; (2) _is_rate_limited() classifier correctly distinguishes between rate limiting (429, 403 with x-ratelimit-remaining=0, 403 with retry-after, 403 with abuse detection body) and access denied (403 for private repos); (3) Non-existent GitHub repos correctly return GitHubRepoUnavailable (404 path), not GitHubAccessDenied; (4) New error codes GitHubAccessDenied and BitbucketAccessDenied are wired end-to-end with user-facing help text; (5) Golden snapshot test confirms the large analyzer/exports/drafts/classifier refactor is behaviour-preserving (IDENTICAL across 5 fixtures); (6) All seeded demo scans maintain correct scores; (7) Series SER-C7EB608470FE has correct run history; (8) All export endpoints work correctly; (9) Redacted PDF actually redacts; (10) All frontend pages render without console errors.",
+  
+  "backend_issues": {
+    "critical_bugs": [],
+    "flaky_endpoints": []
+  },
+  
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  
+  "passed_tests": [
+    "Unit tests: _is_rate_limited() classifier (14/14 tests pass)",
+    "Golden snapshot: refactor is behaviour-preserving (IDENTICAL across 5 fixtures)",
+    "Backend API tests: all 26 tests pass (health, config, scans, results, exports, validation, settings, series, regression)",
+    "User-reported bug PART 1: Zip upload scan completes successfully in preview (no 403 errors)",
+    "User-reported bug PART 2: GitHub scan (humanlayer/12-factor-agents) completes successfully in preview (no 403 errors)",
+    "404 handling: Non-existent GitHub repo returns GitHubRepoUnavailable with 'could not find' message",
+    "Error codes wired end-to-end: GitHubAccessDenied and BitbucketAccessDenied present in IMPORT_ERROR_CODES and ERROR_HELP",
+    "Seeded demo scans maintain correct scores: SCN-2026-07-26-0001 (35, Critical), SCN-2026-06-30-0001 (80, Lean), SCN-2026-07-29-0005 (79, Watchlist), SCN-2026-07-29-0006 (55, Wasteful)",
+    "Series SER-C7EB608470FE: run_count=2, latest_score=55, verdict=Wasteful, previous_score=79, delta=-24",
+    "Export endpoints: pdf_full, pdf_redacted, csv, draft_zip, handoff_zip all return 200 with correct content types",
+    "Redaction: redacted PDF does not leak real file paths, full PDF contains them",
+    "CSV parsing: row count matches issue count, all required columns present",
+    "Frontend pages: Landing, New scan, History, Scan results, Settings, Exports, VS Code handoff all render without console errors"
+  ],
+  
+  "test_report_links": [
+    "/app/test_importer_403_fix.py",
+    "/app/backend_test.py",
+    "/app/tests/golden_snapshot.py",
+    "/app/test_404_github.py",
+    "/app/test_seeded_scans.py",
+    "/app/test_series_details.py"
+  ],
+  
+  "success_percentage": {
+    "backend": "100% (26/26 API tests + 14/14 unit tests + golden snapshot IDENTICAL)",
+    "frontend": "100% (7/7 pages render without errors, 2/2 scan flows complete successfully)"
+  },
+  
+  "updated_files": [
+    "/app/test_importer_403_fix.py",
+    "/app/test_404_github.py",
+    "/app/test_seeded_scans.py",
+    "/app/test_series_details.py"
+  ],
+  
+  "action_item_for_main_agent": "",
+  
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_test_itself": false
+}

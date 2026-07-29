@@ -65,18 +65,25 @@ def parse_bitbucket_url(url: str):
 
 
 def _is_rate_limited(resp: httpx.Response) -> bool:
+    """True when the host is throttling us rather than refusing access outright.
+
+    GitHub signals throttling in several ways: 429, a 403 with the primary quota exhausted
+    (x-ratelimit-remaining: 0), or a 403 for the *secondary* rate limit, which keeps a positive
+    remaining count and instead sends Retry-After.
+    """
     if resp.status_code == 429:
         return True
     if resp.status_code == 403:
-        remaining = resp.headers.get("x-ratelimit-remaining")
-        if remaining == "0":
+        if resp.headers.get("x-ratelimit-remaining") == "0":
+            return True
+        if resp.headers.get("retry-after"):
             return True
         body = ""
         try:
             body = resp.text.lower()
         except Exception:
             body = ""
-        if "rate limit" in body or "api rate limit" in body:
+        if any(marker in body for marker in ("rate limit", "api rate limit", "abuse detection")):
             return True
     return False
 
@@ -184,6 +191,17 @@ def import_github(url: str, branch: Optional[str], work_dir: str, token: Optiona
                     "GitHubRepoUnavailable",
                     f"GitHub could not find a public repository at {owner}/{repo}.",
                 )
+            if meta.status_code == 403:
+                # Not throttling (that is handled above), so GitHub is refusing access:
+                # a private repository, a blocked repository, or a token without the right scope.
+                raise ImportError_(
+                    "GitHubAccessDenied",
+                    f"GitHub refused access to {owner}/{repo} with HTTP 403. That usually means the "
+                    "repository is private or blocked, or the unauthenticated request limit of 60 per "
+                    "hour has been used up. Add a personal access token in Settings, wait a few "
+                    "minutes, or upload the repository as a zip instead.",
+                    15,
+                )
             if meta.status_code >= 400:
                 raise ImportError_(
                     "GitHubRepoUnavailable",
@@ -264,7 +282,14 @@ def import_bitbucket(url: str, branch: Optional[str], work_dir: str, token: Opti
                     "Bitbucket rate limited this request. Please retry in 15 minutes.",
                     15,
                 )
-            if meta.status_code in (403, 404):
+            if meta.status_code == 403:
+                raise ImportError_(
+                    "BitbucketAccessDenied",
+                    f"Bitbucket refused access to {owner}/{repo} with HTTP 403. The repository is "
+                    "most likely private. Upload it as a zip instead, or add a Bitbucket token in "
+                    "Settings.",
+                )
+            if meta.status_code == 404:
                 raise ImportError_(
                     "BitbucketRepoUnavailable",
                     f"Bitbucket could not find a public repository at {owner}/{repo}.",

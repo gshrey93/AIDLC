@@ -7,6 +7,7 @@ import os
 import re
 import zipfile
 from datetime import datetime, timezone
+from typing import NamedTuple
 
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_LEFT
@@ -229,32 +230,60 @@ def _score_banner(payload, st):
     return t
 
 
-def _common_sections(payload, st, redacted, alias, issue_limit, file_limit):
-    scan = payload["scan"]
-    det = payload.get("detections", {}) or {}
-    assumptions = payload.get("assumptions", {}) or {}
-    story = []
+class _Ctx(NamedTuple):
+    """Everything a PDF section needs, so each section is a small pure function."""
 
-    story.append(Paragraph("Agentic Efficiency Report" + (" (Redacted)" if redacted else ""), st["h1"]))
-    story.append(Paragraph(
-        f"{_esc(scan.get('repo_name'))}"
-        + (f" &nbsp;·&nbsp; branch {_esc(scan.get('branch'))}" if scan.get("branch") else "")
-        + f" &nbsp;·&nbsp; {_esc(scan.get('source_type'))} import &nbsp;·&nbsp; scan {_esc(scan.get('id'))}",
-        st["sub"]))
-    story.append(Spacer(1, 8))
-    story.append(_score_banner(payload, st))
-    story.append(Spacer(1, 10))
+    payload: dict
+    st: dict
+    redacted: bool
+    alias: dict
+    issue_limit: int
+    file_limit: int
 
-    if redacted:
-        story.append(Paragraph("Redaction rules applied", st["h2"]))
-        story.append(Paragraph(
+    @property
+    def scan(self) -> dict:
+        return self.payload["scan"]
+
+    def text(self, value) -> str:
+        """Redact free text when building the redacted report, otherwise pass it through."""
+        return redact_text(value or "", self.alias) if self.redacted else (value or "")
+
+    def path(self, value: str) -> str:
+        return self.alias.get(value, "[hidden]") if self.redacted else value
+
+
+def _sec_header(c: _Ctx) -> list:
+    scan = c.scan
+    return [
+        Paragraph("Agentic Efficiency Report" + (" (Redacted)" if c.redacted else ""), c.st["h1"]),
+        Paragraph(
+            f"{_esc(scan.get('repo_name'))}"
+            + (f" &nbsp;·&nbsp; branch {_esc(scan.get('branch'))}" if scan.get("branch") else "")
+            + f" &nbsp;·&nbsp; {_esc(scan.get('source_type'))} import &nbsp;·&nbsp; scan {_esc(scan.get('id'))}",
+            c.st["sub"]),
+        Spacer(1, 8),
+        _score_banner(c.payload, c.st),
+        Spacer(1, 10),
+    ]
+
+
+def _sec_redaction_notice(c: _Ctx) -> list:
+    if not c.redacted:
+        return []
+    return [
+        Paragraph("Redaction rules applied", c.st["h2"]),
+        Paragraph(
             "File contents and code samples are removed. Exact file and folder names are replaced with "
             "path aliases such as dir-01/file-007.md. Counts, scores, category findings, penalties and "
-            "savings estimates are preserved exactly as in the full report.", st["body"]))
-        story.append(Spacer(1, 6))
+            "savings estimates are preserved exactly as in the full report.", c.st["body"]),
+        Spacer(1, 6),
+    ]
 
-    story.append(Paragraph("What we found", st["h2"]))
-    savings_rows = [
+
+def _sec_what_we_found(c: _Ctx) -> list:
+    scan = c.scan
+    det = c.payload.get("detections", {}) or {}
+    rows = [
         ("Overall efficiency score", f"{scan.get('overall_score', 0)} / 100"),
         ("Verdict", (scan.get("verdict") or scan.get("status") or "-")
             + ("  (PartialScan)" if scan.get("partial_scan") else "")),
@@ -273,166 +302,215 @@ def _common_sections(payload, st, redacted, alias, issue_limit, file_limit):
         ("Review stages inferred", _fmt_int(det.get("review_stages_inferred"))),
         ("Agent-like files detected", _fmt_int(det.get("agent_like_files"))),
     ]
-    story.append(_kv_table(savings_rows, st))
+    return [Paragraph("What we found", c.st["h2"]), _kv_table(rows, c.st)]
 
-    story.append(Paragraph("Category scores", st["h2"]))
+
+def _sec_category_scores(c: _Ctx) -> list:
     rows = [
-        (c.get("label") or c.get("category"), f"{c.get('score')}/100",
-         f"{int(round(float(c.get('weight', 0)) * 100))}%", f"-{c.get('penalty_points', 0)}",
-         redact_text(c.get("summary", ""), alias) if redacted else c.get("summary", ""))
-        for c in payload.get("category_scores", [])
+        (cat.get("label") or cat.get("category"), f"{cat.get('score')}/100",
+         f"{int(round(float(cat.get('weight', 0)) * 100))}%", f"-{cat.get('penalty_points', 0)}",
+         c.text(cat.get("summary", "")))
+        for cat in c.payload.get("category_scores", [])
     ]
-    story.append(_grid_table(
-        ["Category", "Score", "Weight", "Penalty", "What this means"],
-        rows, [34 * mm, 14 * mm, 14 * mm, 16 * mm, 84 * mm], st))
+    return [
+        Paragraph("Category scores", c.st["h2"]),
+        _grid_table(["Category", "Score", "Weight", "Penalty", "What this means"],
+                    rows, [34 * mm, 14 * mm, 14 * mm, 16 * mm, 84 * mm], c.st),
+    ]
 
-    drivers = payload.get("top_drivers", [])
-    story.append(Paragraph("Top 5 waste drivers, in plain language", st["h2"]))
-    if drivers:
-        for d in drivers[:5]:
-            title = redact_text(d.get("title", ""), alias) if redacted else d.get("title", "")
-            story.append(KeepTogether([
-                Paragraph(f"{d.get('rank')}. {_esc(title)}", st["h3"]),
-                Paragraph(_esc(d.get("plain_language", "")), st["body"]),
-                Paragraph(
-                    f"<font color='#475569'>{_esc(d.get('category'))} · "
-                    f"{_fmt_int(d.get('estimated_token_waste'))} tokens/month · "
-                    f"{d.get('estimated_credit_waste', 0):,.2f} credits · "
-                    f"{_fmt_money(d.get('estimated_dollar_waste'))}</font>", st["small"]),
-                Spacer(1, 4),
-            ]))
-    else:
-        story.append(Paragraph("No waste drivers were detected for this scan.", st["body"]))
 
-    story.append(Paragraph("Savings assumptions and formulas", st["h2"]))
-    for note in assumptions.get("notes", []):
-        story.append(Paragraph("• " + _esc(note), st["body"]))
-    story.append(Spacer(1, 4))
-    story.append(_grid_table(
+def _sec_top_drivers(c: _Ctx) -> list:
+    drivers = c.payload.get("top_drivers", [])
+    out = [Paragraph("Top 5 waste drivers, in plain language", c.st["h2"])]
+    if not drivers:
+        out.append(Paragraph("No waste drivers were detected for this scan.", c.st["body"]))
+        return out
+    for d in drivers[:5]:
+        out.append(KeepTogether([
+            Paragraph(f"{d.get('rank')}. {_esc(c.text(d.get('title', '')))}", c.st["h3"]),
+            Paragraph(_esc(d.get("plain_language", "")), c.st["body"]),
+            Paragraph(
+                f"<font color='#475569'>{_esc(d.get('category'))} · "
+                f"{_fmt_int(d.get('estimated_token_waste'))} tokens/month · "
+                f"{d.get('estimated_credit_waste', 0):,.2f} credits · "
+                f"{_fmt_money(d.get('estimated_dollar_waste'))}</font>", c.st["small"]),
+            Spacer(1, 4),
+        ]))
+    return out
+
+
+def _sec_assumptions(c: _Ctx) -> list:
+    a = c.payload.get("assumptions", {}) or {}
+    out = [Paragraph("Savings assumptions and formulas", c.st["h2"])]
+    out += [Paragraph("• " + _esc(note), c.st["body"]) for note in a.get("notes", [])]
+    out.append(Spacer(1, 4))
+    out.append(_grid_table(
         ["Setting", "Value"],
         [
-            ("Tokens per report credit", _fmt_int(assumptions.get("tokens_per_report_credit"))),
-            ("Vendor credits per dollar", str(assumptions.get("vendor_credits_per_dollar"))),
-            ("Input tokens per vendor credit", _fmt_int(assumptions.get("input_tokens_per_vendor_credit"))),
-            ("Output tokens per vendor credit", _fmt_int(assumptions.get("output_tokens_per_vendor_credit"))),
-            ("$ per 1M input tokens", _fmt_money(assumptions.get("input_dollars_per_million"))),
-            ("$ per 1M output tokens", _fmt_money(assumptions.get("output_dollars_per_million"))),
-            ("Agent runs per month", _fmt_int(assumptions.get("agent_runs_per_month"))),
-            ("Output token share of waste", f"{float(assumptions.get('output_token_share', 0)) * 100:.0f}%"),
-            ("Aggregate variance", f"+/-{float(assumptions.get('variance_pct', 0)) * 100:.0f}%"),
-            ("Rates last refreshed", str(assumptions.get("rates_last_refreshed") or "never")),
-            ("Rates source", str(assumptions.get("rates_source") or "-")),
-        ], [60 * mm, 102 * mm], st))
+            ("Tokens per report credit", _fmt_int(a.get("tokens_per_report_credit"))),
+            ("Vendor credits per dollar", str(a.get("vendor_credits_per_dollar"))),
+            ("Input tokens per vendor credit", _fmt_int(a.get("input_tokens_per_vendor_credit"))),
+            ("Output tokens per vendor credit", _fmt_int(a.get("output_tokens_per_vendor_credit"))),
+            ("$ per 1M input tokens", _fmt_money(a.get("input_dollars_per_million"))),
+            ("$ per 1M output tokens", _fmt_money(a.get("output_dollars_per_million"))),
+            ("Agent runs per month", _fmt_int(a.get("agent_runs_per_month"))),
+            ("Output token share of waste", f"{float(a.get('output_token_share', 0)) * 100:.0f}%"),
+            ("Aggregate variance", f"+/-{float(a.get('variance_pct', 0)) * 100:.0f}%"),
+            ("Rates last refreshed", str(a.get("rates_last_refreshed") or "never")),
+            ("Rates source", str(a.get("rates_source") or "-")),
+        ], [60 * mm, 102 * mm], c.st))
+    return out
 
-    ledger = payload.get("penalty_ledger", [])
-    if ledger:
-        story.append(Paragraph("How the score was calculated", st["h2"]))
-        story.append(_grid_table(
+
+def _sec_penalty_ledger(c: _Ctx) -> list:
+    ledger = c.payload.get("penalty_ledger", [])
+    if not ledger:
+        return []
+    return [
+        Paragraph("How the score was calculated", c.st["h2"]),
+        _grid_table(
             ["Penalty rule", "Hits", "Points each", "Cap", "Applied", "Category"],
             [(r["rule"], _fmt_int(r["hits"]), _fmt_int(r["points_each"]), _fmt_int(r["cap"]),
               f"-{r['applied']}", r["category"]) for r in ledger],
-            [72 * mm, 12 * mm, 18 * mm, 12 * mm, 16 * mm, 32 * mm], st))
+            [72 * mm, 12 * mm, 18 * mm, 12 * mm, 16 * mm, 32 * mm], c.st),
+    ]
 
-    issues = payload.get("issues", [])
-    story.append(PageBreak())
-    story.append(Paragraph(f"Findings ({len(issues)} issues)", st["h2"]))
-    if issues:
-        rows = []
-        for iss in issues[:issue_limit]:
-            files = iss.get("impacted_files") or []
-            if redacted:
-                shown = ", ".join(alias.get(p, "[hidden]") for p in files[:4])
-            else:
-                shown = ", ".join(files[:4])
-            if len(files) > 4:
-                shown += f" (+{len(files) - 4} more)"
-            rows.append((
-                iss.get("id"), iss.get("severity"), iss.get("category"),
-                redact_text(iss.get("title", ""), alias) if redacted else iss.get("title", ""),
-                shown or "-",
-                _fmt_int(iss.get("estimated_token_waste")),
-                f"{iss.get('estimated_credit_waste', 0):,.2f}",
-                _fmt_money(iss.get("estimated_dollar_waste")),
-            ))
-        story.append(_grid_table(
-            ["Issue", "Severity", "Category", "Title", "Impacted files", "Tokens/mo", "Credits/mo", "$/mo"],
-            rows, [23 * mm, 14 * mm, 22 * mm, 40 * mm, 33 * mm, 12 * mm, 10 * mm, 8 * mm], st))
-        if len(issues) > issue_limit:
-            story.append(Paragraph(
-                f"Showing the {issue_limit} highest impact issues of {len(issues)}. "
-                "The CSV export contains every issue.", st["small"]))
-    else:
-        story.append(Paragraph("No issues were recorded for this scan.", st["body"]))
 
-    if not redacted and issues:
-        story.append(Paragraph("Evidence detail", st["h2"]))
-        for iss in issues[:min(issue_limit, 40)]:
-            story.append(KeepTogether([
-                Paragraph(f"{_esc(iss.get('id'))} — {_esc(iss.get('title'))}", st["h3"]),
-                Paragraph(_esc(iss.get("description")), st["body"]),
-                Paragraph(f"<b>Evidence:</b> {_esc(iss.get('evidence'))}", st["small"]),
-                Paragraph(f"<b>Formula:</b> {_esc(iss.get('formula'))}", st["small"]),
-                Paragraph(f"<b>Recommendation:</b> {_esc(iss.get('recommendation'))} "
-                          f"(impact {_esc(iss.get('impact'))}, effort {_esc(iss.get('effort'))})", st["small"]),
-                Spacer(1, 4),
-            ]))
+def _impacted_files_cell(c: _Ctx, files: list) -> str:
+    shown = ", ".join(c.path(p) for p in files[:4])
+    if len(files) > 4:
+        shown += f" (+{len(files) - 4} more)"
+    return shown or "-"
 
-    actions = payload.get("recommended_actions", [])
-    if actions:
-        story.append(Paragraph("Recommended actions, ranked by impact then effort", st["h2"]))
-        story.append(_grid_table(
+
+def _sec_findings(c: _Ctx) -> list:
+    issues = c.payload.get("issues", [])
+    out = [PageBreak(), Paragraph(f"Findings ({len(issues)} issues)", c.st["h2"])]
+    if not issues:
+        out.append(Paragraph("No issues were recorded for this scan.", c.st["body"]))
+        return out
+    rows = [(
+        iss.get("id"), iss.get("severity"), iss.get("category"), c.text(iss.get("title", "")),
+        _impacted_files_cell(c, iss.get("impacted_files") or []),
+        _fmt_int(iss.get("estimated_token_waste")),
+        f"{iss.get('estimated_credit_waste', 0):,.2f}",
+        _fmt_money(iss.get("estimated_dollar_waste")),
+    ) for iss in issues[:c.issue_limit]]
+    out.append(_grid_table(
+        ["Issue", "Severity", "Category", "Title", "Impacted files", "Tokens/mo", "Credits/mo", "$/mo"],
+        rows, [23 * mm, 14 * mm, 22 * mm, 40 * mm, 33 * mm, 12 * mm, 10 * mm, 8 * mm], c.st))
+    if len(issues) > c.issue_limit:
+        out.append(Paragraph(
+            f"Showing the {c.issue_limit} highest impact issues of {len(issues)}. "
+            "The CSV export contains every issue.", c.st["small"]))
+    return out
+
+
+def _sec_evidence(c: _Ctx) -> list:
+    """Full report only: the evidence behind each finding is never in the redacted report."""
+    issues = c.payload.get("issues", [])
+    if c.redacted or not issues:
+        return []
+    out = [Paragraph("Evidence detail", c.st["h2"])]
+    for iss in issues[:min(c.issue_limit, 40)]:
+        out.append(KeepTogether([
+            Paragraph(f"{_esc(iss.get('id'))} — {_esc(iss.get('title'))}", c.st["h3"]),
+            Paragraph(_esc(iss.get("description")), c.st["body"]),
+            Paragraph(f"<b>Evidence:</b> {_esc(iss.get('evidence'))}", c.st["small"]),
+            Paragraph(f"<b>Formula:</b> {_esc(iss.get('formula'))}", c.st["small"]),
+            Paragraph(f"<b>Recommendation:</b> {_esc(iss.get('recommendation'))} "
+                      f"(impact {_esc(iss.get('impact'))}, effort {_esc(iss.get('effort'))})", c.st["small"]),
+            Spacer(1, 4),
+        ]))
+    return out
+
+
+def _sec_actions(c: _Ctx) -> list:
+    actions = c.payload.get("recommended_actions", [])
+    if not actions:
+        return []
+    return [
+        Paragraph("Recommended actions, ranked by impact then effort", c.st["h2"]),
+        _grid_table(
             ["#", "Action", "Category", "Impact", "Effort", "Tokens/mo saved", "$/mo saved"],
-            [(str(i + 1), redact_text(a["action"], alias) if redacted else a["action"], a["category"],
-              a["impact"], a["effort"], _fmt_int(a["estimated_token_reduction"]),
-              _fmt_money(a["estimated_dollar_savings"]))
+            [(str(i + 1), c.text(a["action"]), a["category"], a["impact"], a["effort"],
+              _fmt_int(a["estimated_token_reduction"]), _fmt_money(a["estimated_dollar_savings"]))
              for i, a in enumerate(actions)],
-            [8 * mm, 62 * mm, 30 * mm, 15 * mm, 14 * mm, 20 * mm, 13 * mm], st))
+            [8 * mm, 62 * mm, 30 * mm, 15 * mm, 14 * mm, 20 * mm, 13 * mm], c.st),
+    ]
 
-    story.append(PageBreak())
-    story.append(Paragraph("File inventory by category", st["h2"]))
-    inv = payload.get("inventory_summary") or {}
+
+def _sec_inventory(c: _Ctx) -> list:
+    out = [PageBreak(), Paragraph("File inventory by category", c.st["h2"])]
+    inv = c.payload.get("inventory_summary") or {}
     if inv:
-        story.append(_grid_table(
+        out.append(_grid_table(
             ["Group", "Files", "Parsed", "Skipped", "Tokens"],
             [(g, _fmt_int(v.get("count")), _fmt_int(v.get("parsed")), _fmt_int(v.get("skipped")),
               _fmt_int(v.get("tokens"))) for g, v in inv.items()],
-            [56 * mm, 22 * mm, 22 * mm, 24 * mm, 38 * mm], st))
+            [56 * mm, 22 * mm, 22 * mm, 24 * mm, 38 * mm], c.st))
 
-    files = payload.get("files", [])
+    files = c.payload.get("files", [])
     if files:
-        shown = sorted(files, key=lambda f: -(f.get("estimated_tokens") or 0))[:file_limit]
-        story.append(Paragraph(f"Largest {len(shown)} files by estimated tokens", st["h3"]))
-        story.append(_grid_table(
+        shown = sorted(files, key=lambda f: -(f.get("estimated_tokens") or 0))[:c.file_limit]
+        out.append(Paragraph(f"Largest {len(shown)} files by estimated tokens", c.st["h3"]))
+        out.append(_grid_table(
             ["Path", "Category", "Status", "Lines", "Size (KB)", "Tokens", "Dup group"],
-            [((alias.get(f["path"], "[hidden]") if redacted else f["path"]),
-              f.get("category"), f.get("parse_status"), _fmt_int(f.get("line_count")),
-              f"{(f.get('size_bytes') or 0) / 1024:.1f}", _fmt_int(f.get("estimated_tokens")),
-              f.get("similarity_group") or "-") for f in shown],
-            [62 * mm, 22 * mm, 24 * mm, 13 * mm, 16 * mm, 16 * mm, 19 * mm], st))
+            [(c.path(f["path"]), f.get("category"), f.get("parse_status"),
+              _fmt_int(f.get("line_count")), f"{(f.get('size_bytes') or 0) / 1024:.1f}",
+              _fmt_int(f.get("estimated_tokens")), f.get("similarity_group") or "-") for f in shown],
+            [62 * mm, 22 * mm, 24 * mm, 13 * mm, 16 * mm, 16 * mm, 19 * mm], c.st))
+    return out
 
+
+def _sec_skipped(c: _Ctx) -> list:
+    files = c.payload.get("files", [])
     skipped = [f for f in files if f.get("parse_status") != "Scanned"]
-    story.append(Paragraph("Skipped files and warnings", st["h2"]))
-    for w in payload.get("warnings", []) or []:
-        story.append(Paragraph("• " + _esc(w), st["body"]))
-    if skipped:
-        counts: dict = {}
-        for f in skipped:
-            counts[f.get("parse_status")] = counts.get(f.get("parse_status"), 0) + 1
-        story.append(Paragraph(
-            "Skipped by reason: " + ", ".join(f"{k} = {v}" for k, v in sorted(counts.items())), st["body"]))
-        story.append(Spacer(1, 4))
-        story.append(_grid_table(
-            ["Path", "Status", "Size (KB)", "Reason"],
-            [((alias.get(f["path"], "[hidden]") if redacted else f["path"]), f.get("parse_status"),
-              f"{(f.get('size_bytes') or 0) / 1024:.1f}",
-              redact_text(f.get("skip_reason") or "", alias) if redacted else (f.get("skip_reason") or ""))
-             for f in skipped[:min(file_limit, 200)]],
-            [58 * mm, 26 * mm, 18 * mm, 60 * mm], st))
-        if len(skipped) > min(file_limit, 200):
-            story.append(Paragraph(f"...and {len(skipped) - min(file_limit, 200)} more skipped files.", st["small"]))
-    else:
-        story.append(Paragraph("Every discovered file was parsed successfully.", st["body"]))
+    out = [Paragraph("Skipped files and warnings", c.st["h2"])]
+    out += [Paragraph("• " + _esc(w), c.st["body"]) for w in (c.payload.get("warnings") or [])]
+    if not skipped:
+        out.append(Paragraph("Every discovered file was parsed successfully.", c.st["body"]))
+        return out
 
+    counts: dict = {}
+    for f in skipped:
+        counts[f.get("parse_status")] = counts.get(f.get("parse_status"), 0) + 1
+    out.append(Paragraph(
+        "Skipped by reason: " + ", ".join(f"{k} = {v}" for k, v in sorted(counts.items())), c.st["body"]))
+    out.append(Spacer(1, 4))
+    cap = min(c.file_limit, 200)
+    out.append(_grid_table(
+        ["Path", "Status", "Size (KB)", "Reason"],
+        [(c.path(f["path"]), f.get("parse_status"), f"{(f.get('size_bytes') or 0) / 1024:.1f}",
+          c.text(f.get("skip_reason") or "")) for f in skipped[:cap]],
+        [58 * mm, 26 * mm, 18 * mm, 60 * mm], c.st))
+    if len(skipped) > cap:
+        out.append(Paragraph(f"...and {len(skipped) - cap} more skipped files.", c.st["small"]))
+    return out
+
+
+# Report order. Each entry takes the context and returns a list of flowables.
+PDF_SECTIONS = (
+    _sec_header,
+    _sec_redaction_notice,
+    _sec_what_we_found,
+    _sec_category_scores,
+    _sec_top_drivers,
+    _sec_assumptions,
+    _sec_penalty_ledger,
+    _sec_findings,
+    _sec_evidence,
+    _sec_actions,
+    _sec_inventory,
+    _sec_skipped,
+)
+
+
+def _common_sections(payload, st, redacted, alias, issue_limit, file_limit):
+    ctx = _Ctx(payload, st, redacted, alias, issue_limit, file_limit)
+    story: list = []
+    for section in PDF_SECTIONS:
+        story.extend(section(ctx))
     return story
 
 
@@ -606,11 +684,8 @@ def drafts_zip(payload: dict) -> bytes:
     return buf.getvalue()
 
 
-def efficiency_summary_md(payload: dict) -> str:
-    scan = payload["scan"]
-    det = payload.get("detections", {}) or {}
-    a = payload.get("assumptions", {}) or {}
-    lines = [
+def _md_headline(scan: dict) -> list:
+    return [
         f"# Agentic efficiency summary — {scan.get('repo_name')}",
         "",
         f"- Scan: `{scan.get('id')}`",
@@ -626,32 +701,67 @@ def efficiency_summary_md(payload: dict) -> str:
         f"${float(scan.get('estimated_monthly_dollar_waste') or 0):,.2f})",
         f"- Savings range: ${float(scan.get('estimated_savings_low') or 0):,.2f} to "
         f"${float(scan.get('estimated_savings_high') or 0):,.2f} per month",
+    ]
+
+
+def _md_category_table(payload: dict) -> list:
+    lines = [
         "",
         "## Category scores",
         "",
         "| Category | Score | Penalty | What this means |",
         "| --- | --- | --- | --- |",
     ]
-    for c in payload.get("category_scores", []):
-        lines.append(f"| {c.get('label')} | {c.get('score')}/100 | -{c.get('penalty_points')} | {c.get('summary')} |")
-    lines += ["", "## Top waste drivers", ""]
+    lines += [
+        f"| {c.get('label')} | {c.get('score')}/100 | -{c.get('penalty_points')} | {c.get('summary')} |"
+        for c in payload.get("category_scores", [])
+    ]
+    return lines
+
+
+def _md_drivers(payload: dict) -> list:
+    lines = ["", "## Top waste drivers", ""]
     for d in payload.get("top_drivers", [])[:5]:
         lines.append(f"{d.get('rank')}. **{d.get('title')}** — {d.get('plain_language')}")
         lines.append(f"   - {int(d.get('estimated_token_waste') or 0):,} tokens/month, "
                      f"${float(d.get('estimated_dollar_waste') or 0):,.2f}/month")
-    lines += ["", "## Signals", "",
-              f"- Duplicate clusters: {det.get('duplicate_clusters_found', 0)}",
-              f"- Repeated instruction blocks: {det.get('repeated_block_groups', 0)}",
-              f"- Oversized context files: {det.get('oversized_context_files', 0)}",
-              f"- Overlapping agent groups: {det.get('overlapping_agent_groups', 0)}",
-              f"- Review stages inferred: {det.get('review_stages_inferred', 0)}",
-              f"- Agent-like files: {det.get('agent_like_files', 0)}",
-              "", "## Recommended actions", "",
-              "| # | Action | Impact | Effort | Tokens/mo saved |", "| --- | --- | --- | --- | --- |"]
-    for i, act in enumerate(payload.get("recommended_actions", []), start=1):
-        lines.append(f"| {i} | {act['action']} | {act['impact']} | {act['effort']} | "
-                     f"{int(act['estimated_token_reduction']):,} |")
-    lines += ["", "## Assumptions", ""] + [f"- {n}" for n in a.get("notes", [])]
+    return lines
+
+
+def _md_signals(det: dict) -> list:
+    return [
+        "", "## Signals", "",
+        f"- Duplicate clusters: {det.get('duplicate_clusters_found', 0)}",
+        f"- Repeated instruction blocks: {det.get('repeated_block_groups', 0)}",
+        f"- Oversized context files: {det.get('oversized_context_files', 0)}",
+        f"- Overlapping agent groups: {det.get('overlapping_agent_groups', 0)}",
+        f"- Review stages inferred: {det.get('review_stages_inferred', 0)}",
+        f"- Agent-like files: {det.get('agent_like_files', 0)}",
+    ]
+
+
+def _md_actions(payload: dict) -> list:
+    lines = [
+        "", "## Recommended actions", "",
+        "| # | Action | Impact | Effort | Tokens/mo saved |", "| --- | --- | --- | --- | --- |",
+    ]
+    lines += [
+        f"| {i} | {act['action']} | {act['impact']} | {act['effort']} | "
+        f"{int(act['estimated_token_reduction']):,} |"
+        for i, act in enumerate(payload.get("recommended_actions", []), start=1)
+    ]
+    return lines
+
+
+def efficiency_summary_md(payload: dict) -> str:
+    scan = payload["scan"]
+    assumptions = payload.get("assumptions", {}) or {}
+    lines = _md_headline(scan)
+    lines += _md_category_table(payload)
+    lines += _md_drivers(payload)
+    lines += _md_signals(payload.get("detections", {}) or {})
+    lines += _md_actions(payload)
+    lines += ["", "## Assumptions", ""] + [f"- {n}" for n in assumptions.get("notes", [])]
     lines += ["", "---", "Generated by Bloat Guardian."]
     return "\n".join(lines)
 

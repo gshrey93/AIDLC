@@ -37,9 +37,10 @@ METADATA_RETENTION_DAYS = 30
 KEEP_RECENT_SCANS = 10
 
 IMPORT_ERROR_CODES = {
-    "GitHubRepoUnavailable", "GitHubRateLimited", "RepoTooLarge", "BranchNotFound",
-    "ZipCorrupted", "ZipTooLarge", "BitbucketRepoUnavailable", "BitbucketRateLimited",
-    "ImportFailed", "ArchiveNotFound", "RateLimited",
+    "GitHubRepoUnavailable", "GitHubRateLimited", "GitHubAccessDenied", "RepoTooLarge",
+    "BranchNotFound", "ZipCorrupted", "ZipTooLarge", "BitbucketRepoUnavailable",
+    "BitbucketRateLimited", "BitbucketAccessDenied", "ImportFailed", "ArchiveNotFound",
+    "RateLimited",
 }
 
 

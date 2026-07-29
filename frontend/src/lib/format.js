@@ -129,6 +129,10 @@ export const ERROR_HELP = {
     "GitHub could not find that public repository. Check the owner and repository name, or upload a zip instead.",
   GitHubRateLimited:
     "GitHub is rate limiting us. Please retry in 15 minutes, or add a GitHub personal access token in Settings.",
+  GitHubAccessDenied:
+    "GitHub refused access with HTTP 403. That is usually a private or blocked repository, or the unauthenticated limit of 60 requests per hour being used up. Add a personal access token in Settings, wait a few minutes, or upload the repository as a zip.",
+  BitbucketAccessDenied:
+    "Bitbucket refused access with HTTP 403. The repository is most likely private. Upload it as a zip instead, or add a Bitbucket token in Settings.",
   BitbucketRepoUnavailable:
     "Bitbucket could not find that public repository. Check the workspace and repository name, or upload a zip instead.",
   BitbucketRateLimited: "Bitbucket is rate limiting us. Please retry in 15 minutes.",

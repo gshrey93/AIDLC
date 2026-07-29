@@ -63,45 +63,70 @@ def optimised_name(path: str) -> str:
     return f"{stem}-optimised{ext if ext == '.md' else '.md'}"
 
 
+DRAFTABLE_CATEGORIES = (CATEGORY_AGENT, CATEGORY_ORCHESTRATION, CATEGORY_CONTEXT, CATEGORY_SKILL)
+
+
+def _is_draft_eligible(f) -> bool:
+    """Only agent, orchestration, context, memory and skill files are worth rewriting."""
+    return (
+        f.parse_status == "Scanned"
+        and bool(f.content)
+        and f.estimated_tokens >= MIN_SOURCE_TOKENS
+        and f.category in DRAFTABLE_CATEGORIES
+    )
+
+
+def _problem_paths(analysis: dict) -> set:
+    """Paths the adversary scan already flagged: duplicate clusters, repeated blocks, oversized."""
+    paths = {p for c in analysis.get("clusters", []) for p in c.get("files", [])}
+    for iss in analysis.get("issues", []):
+        if iss["category"] in ("redundancy", "token_bloat"):
+            paths.update(iss.get("impacted_files") or [])
+    return paths
+
+
+def _rank_key(problem_paths: set):
+    """Canonical filenames first, then flagged files, then largest, then path for stability."""
+    def key(f):
+        canonical = 0 if os.path.basename(f.path).lower() in CANONICAL_NAMES else 1
+        problem = 0 if f.path in problem_paths else 1
+        return (canonical, problem, -f.estimated_tokens, f.path)
+    return key
+
+
+def _cluster_siblings(analysis: dict, path: str) -> list:
+    return sorted({
+        p for c in analysis.get("clusters", []) if path in c.get("files", [])
+        for p in c.get("files", []) if p != path
+    })[:6]
+
+
+def _impact_for(tokens: int, related: list) -> str:
+    if tokens > 8000 or related:
+        return "High"
+    return "Medium" if tokens > 2000 else "Low"
+
+
+def _effort_for(tokens: int) -> str:
+    if tokens <= 4000:
+        return "Small"
+    return "Medium" if tokens <= 20000 else "Large"
+
+
 def select_draft_targets(files: list, analysis: dict, limit: int = MAX_DRAFTS) -> list:
     """Pick eligible files (agent / orchestration / instruction / context / memory only)."""
-    eligible = [
-        f for f in files
-        if f.parse_status == "Scanned" and f.content
-        and f.estimated_tokens >= MIN_SOURCE_TOKENS
-        and f.category in (CATEGORY_AGENT, CATEGORY_ORCHESTRATION, CATEGORY_CONTEXT, CATEGORY_SKILL)
-    ]
-    dup_paths = {p for c in analysis.get("clusters", []) for p in c.get("files", [])}
-    block_paths = set()
-    for iss in analysis.get("issues", []):
-        if iss["category"] == "redundancy":
-            block_paths.update(iss.get("impacted_files") or [])
-    oversized = {
-        p for iss in analysis.get("issues", []) if iss["category"] == "token_bloat"
-        for p in (iss.get("impacted_files") or [])
-    }
-
-    def rank(f):
-        name = os.path.basename(f.path).lower()
-        canonical = 0 if name in CANONICAL_NAMES else 1
-        problem = 0 if (f.path in oversized or f.path in dup_paths or f.path in block_paths) else 1
-        return (canonical, problem, -f.estimated_tokens, f.path)
-
-    eligible.sort(key=rank)
-    picked = eligible[:limit]
+    eligible = [f for f in files if _is_draft_eligible(f)]
+    eligible.sort(key=_rank_key(_problem_paths(analysis)))
     targets = []
-    for f in picked:
-        ttype = target_type_for(f.path, f.category)
-        related = sorted({p for c in analysis.get("clusters", []) if f.path in c.get("files", [])
-                          for p in c.get("files", []) if p != f.path})[:6]
-        big = f.estimated_tokens > 8000
+    for f in eligible[:limit]:
+        related = _cluster_siblings(analysis, f.path)
         targets.append({
             "source_path": f.path,
             "target_filename": optimised_name(f.path),
-            "target_type": ttype,
+            "target_type": target_type_for(f.path, f.category),
             "source_tokens": f.estimated_tokens,
-            "impact": "High" if (big or related) else ("Medium" if f.estimated_tokens > 2000 else "Low"),
-            "effort": "Small" if f.estimated_tokens <= 4000 else ("Medium" if f.estimated_tokens <= 20000 else "Large"),
+            "impact": _impact_for(f.estimated_tokens, related),
+            "effort": _effort_for(f.estimated_tokens),
             "related_duplicates": related,
             "content": f.content,
         })
@@ -146,6 +171,88 @@ def _clean_output(text: str) -> str:
     return t.strip()
 
 
+RETRY_INSTRUCTION = (
+    "Your previous answer was far too short to be a usable replacement file. Produce the FULL "
+    "rewritten markdown document again. Keep every real rule, constraint, tool name, file path "
+    "and acceptance criterion from the original. The rewrite must be at least {min_expected} "
+    "characters long and should land around 40 to 65 percent of the original length. "
+    "Output only the markdown body."
+)
+
+SHORT_DRAFT_WARNING = (
+    "This rewrite came back much shorter than expected. Read it side by side with the original "
+    "before you replace anything, in case a rule was dropped."
+)
+
+
+def _uses_task_budget(provider: str, model: str) -> bool:
+    """Claude Opus 4.7 supports the task-budget beta, which keeps long rewrites affordable."""
+    return provider == "anthropic" and model.startswith("claude-opus-4-7")
+
+
+def _build_chat(api_key: str, provider: str, model: str, session_id: Optional[str], source_path: str):
+    from emergentintegrations.llm.chat import LlmChat
+
+    kwargs = {
+        "api_key": api_key,
+        "session_id": session_id or f"bg-draft-{abs(hash(source_path)) % 10**10}",
+        "system_message": SYSTEM_PROMPT,
+    }
+    if _uses_task_budget(provider, model):
+        kwargs["custom_headers"] = {"anthropic-beta": "task-budgets-2026-03-13"}
+    chat = LlmChat(**kwargs).with_model(provider, model)
+    if _uses_task_budget(provider, model):
+        return chat.with_params(
+            extra_body={
+                "output_config": {
+                    "task_budget": {"type": "tokens", "total": 20000},
+                    "effort": "medium",
+                }
+            },
+            max_tokens=16000,
+        )
+    return chat.with_params(max_tokens=8000)
+
+
+async def _stream_draft(chat, prompt: str) -> str:
+    from emergentintegrations.llm.chat import StreamDone, TextDelta, UserMessage
+
+    buf = []
+    async for ev in chat.stream_message(UserMessage(text=prompt)):
+        if isinstance(ev, TextDelta):
+            buf.append(ev.content)
+        elif isinstance(ev, StreamDone):
+            break
+    return _clean_output("".join(buf))
+
+
+def _min_expected_chars(target: dict) -> int:
+    """A usable rewrite is never a tiny fraction of its source."""
+    source_chars = len(target.get("content") or "")
+    return max(MIN_DRAFT_CHARS, int(min(source_chars, MAX_SOURCE_CHARS) * 0.18))
+
+
+def _draft_record(target: dict, draft: str, provider: str, model: str,
+                  quality_warning: Optional[str]) -> dict:
+    new_tokens = estimate_tokens(len(draft))
+    source_tokens = target["source_tokens"]
+    saved = max(0, source_tokens - new_tokens)
+    return {
+        "source_path": target["source_path"],
+        "target_filename": target["target_filename"],
+        "target_type": target["target_type"],
+        "impact": target["impact"],
+        "effort": target["effort"],
+        "draft_content": draft,
+        "original_tokens": source_tokens,
+        "draft_tokens": new_tokens,
+        "tokens_saved_per_load": saved,
+        "reduction_pct": round((saved / source_tokens * 100) if source_tokens else 0.0, 1),
+        "model": f"{provider}/{model}",
+        "quality_warning": quality_warning,
+    }
+
+
 async def generate_draft(
     target: dict,
     repo_name: str,
@@ -155,76 +262,19 @@ async def generate_draft(
     session_id: Optional[str] = None,
 ) -> dict:
     """Call the LLM and return a RecommendationDraft-shaped dict."""
-    from emergentintegrations.llm.chat import LlmChat, StreamDone, TextDelta, UserMessage
+    chat = _build_chat(api_key, provider, model, session_id, target["source_path"])
+    prompt = build_user_prompt(target, repo_name)
+    min_expected = _min_expected_chars(target)
 
-    kwargs = {
-        "api_key": api_key,
-        "session_id": session_id or f"bg-draft-{abs(hash(target['source_path'])) % 10**10}",
-        "system_message": SYSTEM_PROMPT,
-    }
-    if provider == "anthropic" and model.startswith("claude-opus-4-7"):
-        kwargs["custom_headers"] = {"anthropic-beta": "task-budgets-2026-03-13"}
-    chat = LlmChat(**kwargs).with_model(provider, model)
-    if provider == "anthropic" and model.startswith("claude-opus-4-7"):
-        chat = chat.with_params(
-            extra_body={
-                "output_config": {
-                    "task_budget": {"type": "tokens", "total": 20000},
-                    "effort": "medium",
-                }
-            },
-            max_tokens=16000,
-        )
-    else:
-        chat = chat.with_params(max_tokens=8000)
-
-    async def run(extra: str = "") -> str:
-        buf = []
-        prompt = build_user_prompt(target, repo_name)
-        if extra:
-            prompt = f"{prompt}\n\n{extra}"
-        async for ev in chat.stream_message(UserMessage(text=prompt)):
-            if isinstance(ev, TextDelta):
-                buf.append(ev.content)
-            elif isinstance(ev, StreamDone):
-                break
-        return _clean_output("".join(buf))
-
-    draft = await run()
-    source_chars = len(target.get("content") or "")
-    min_expected = max(MIN_DRAFT_CHARS, int(min(source_chars, MAX_SOURCE_CHARS) * 0.18))
+    draft = await _stream_draft(chat, prompt)
     if len(draft) < min_expected:
-        draft = await run(
-            "Your previous answer was far too short to be a usable replacement file. Produce the FULL "
-            "rewritten markdown document again. Keep every real rule, constraint, tool name, file path "
-            f"and acceptance criterion from the original. The rewrite must be at least {min_expected} "
-            "characters long and should land around 40 to 65 percent of the original length. "
-            "Output only the markdown body."
-        )
-    quality_warning = None
+        # One retry: over-compression loses real rules, so ask again with an explicit floor.
+        draft = await _stream_draft(
+            chat, f"{prompt}\n\n{RETRY_INSTRUCTION.format(min_expected=min_expected)}")
+
     if len(draft) < 80:
         raise RuntimeError(
             "The model returned a draft that was too short to be usable. Try again, or pick a larger file."
         )
-    if len(draft) < min_expected:
-        quality_warning = (
-            "This rewrite came back much shorter than expected. Read it side by side with the original "
-            "before you replace anything, in case a rule was dropped."
-        )
-
-    new_tokens = estimate_tokens(len(draft))
-    saved = max(0, target["source_tokens"] - new_tokens)
-    return {
-        "source_path": target["source_path"],
-        "target_filename": target["target_filename"],
-        "target_type": target["target_type"],
-        "impact": target["impact"],
-        "effort": target["effort"],
-        "draft_content": draft,
-        "original_tokens": target["source_tokens"],
-        "draft_tokens": new_tokens,
-        "tokens_saved_per_load": saved,
-        "reduction_pct": round((saved / target["source_tokens"] * 100) if target["source_tokens"] else 0.0, 1),
-        "model": f"{provider}/{model}",
-        "quality_warning": quality_warning,
-    }
+    warning = None if len(draft) >= min_expected else SHORT_DRAFT_WARNING
+    return _draft_record(target, draft, provider, model, warning)

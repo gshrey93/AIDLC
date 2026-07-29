@@ -1,26 +1,38 @@
 [
   {
-    "content": "Phase 1: POC /app/test_core.py - 59/59 checks passed (real GitHub/Bitbucket import, analyzer, claude-opus-4-7 drafts, all exports)",
+    "content": "Verify the 18 `is` findings - ALL confirmed false positives (`is None`/`is not None`), correctly left unchanged",
     "status": "completed"
   },
   {
-    "content": "Phase 2: Design guidelines - superseded by user-supplied DRL Design System v2.1, fully applied (purple tokens, Inter, dark mode, print styles)",
+    "content": "Fix the two undefined-variable code paths in server.py",
     "status": "completed"
   },
   {
-    "content": "Phase 2: Backend implementation (FastAPI, Mongo, analyzer engine, imports, exports, settings, seed)",
+    "content": "Build golden-snapshot harness (mutation-tested, proven to catch changes)",
     "status": "completed"
   },
   {
-    "content": "Phase 2: Frontend implementation (8 surfaces, all states, exports, settings, theme toggle)",
+    "content": "Refactor core/classifier.py inventory_from_entries - output identical",
     "status": "completed"
   },
   {
-    "content": "Phase 2: All user stories covered in development",
+    "content": "Refactor core/drafts.py select_draft_targets + generate_draft - output identical",
     "status": "completed"
   },
   {
-    "content": "Phase 2: End to End Testing using testing_agent_v3 + fix all bugs",
+    "content": "Refactor core/exports.py _common_sections + efficiency_summary_md - output identical",
+    "status": "completed"
+  },
+  {
+    "content": "Refactor core/analyzer.py analyze() (CC 88, 521 lines, 83 locals) into staged helpers",
     "status": "in_progress"
+  },
+  {
+    "content": "Verify: golden snapshots identical, test_core.py 59/59, esbuild clean",
+    "status": "pending"
+  },
+  {
+    "content": "Call testing_agent to independently verify no behaviour regression",
+    "status": "pending"
   }
 ]

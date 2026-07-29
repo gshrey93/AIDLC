@@ -138,3 +138,38 @@ live, so the 24 agent files in the user's own repository were invisible and it s
 "Budget has been exceeded! Current cost 42.48, max budget 41.0". The Universal Key needs a top-up
 (Profile > Universal Key > Add Balance), or a personal Anthropic/Gemini key in Settings. The app
 already surfaces this as an HTTP 402 with a plain-language message; nothing else is affected.
+
+---
+
+## Health check pass (post-Phase 4)
+
+All green, with two real bugs found and fixed during the sweep.
+
+| Check | Result |
+| --- | --- |
+| Services (backend, frontend, mongodb) | RUNNING |
+| API endpoints via the public URL | 13/13 return 200, including all five exports, print, export-preview, handoff and the archive bundle |
+| Series data integrity | CLEAN: 26 scans, 0 orphans, 25 series, run numbers contiguous, every `score_delta` and `previous_score` recomputed and verified, no orphaned child documents, series keys unique |
+| Frontend routes | 7/7 render, no console errors |
+| `test_core.py` | 59/59 |
+| Frontend compile (esbuild) | clean |
+| LLM draft generation | working again (the budget block has cleared); a fresh draft was written by `anthropic/claude-opus-4-7` |
+| Deployment readiness | pass |
+
+### Bug 1 — duplicate draft IDs (real, user-visible)
+On-demand drafting numbered new drafts `count + 1`. A failed auto-draft leaves a gap in the
+sequence, so that expression could return an id that was already taken: two drafts ended up sharing
+`DRF-SCN-2026-07-29-0006-005`. Because the drafts tab strip keys on the draft id, the duplicate broke
+React reconciliation (a console error) and would have made those two tabs impossible to tell apart.
+
+Fixed at the root: `db.next_draft_id()` picks the lowest genuinely free id and is now used by both
+the auto and on-demand paths; on-demand deletes the previous draft for that file *before* choosing an
+id. Added a unique index on `drafts.id` (created in a try/except so legacy data cannot block
+startup), repaired the one bad record, and switched the tab strip to key on `source_path`, which is
+unique per scan by construction. Verified: a new on-demand draft correctly filled the free slot 003,
+tab switching works, and the results page reports zero console errors.
+
+### Bug 2 — `.gitignore` excluded the `.env` files
+Flagged by the deployment check as a blocker: the deployment bundle needs them. The patterns were
+removed. Note the trade-off — if you sync to GitHub, `backend/.env` now carries the Mongo URL and the
+Universal LLM key, so either keep that repository private or strip the file before pushing.

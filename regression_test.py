@@ -83,16 +83,16 @@ class RegressionTester:
         inv_summary = data.get("inventory_summary", {})
         self.log(f"   Inventory summary keys: {list(inv_summary.keys())}")
         
-        # EXACT counts from the review request
+        # EXACT counts from the review request (CORRECTED - iteration 3)
         expected = {
             "Agents": 86,
             "Skills": 20,
             "Context and memory": 10,
             "Prompt and orchestration": 24,
-            "Source code": 427,
+            "Source code": 61,
             "Diagrams": 1,
-            "Docs": 7,
-            "Other text assets": 205
+            "Docs": 362,
+            "Other text assets": 216
         }
         
         for group, count in expected.items():

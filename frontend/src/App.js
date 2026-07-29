@@ -1,55 +1,43 @@
 import { useEffect } from "react";
+import { BrowserRouter, Route, Routes } from "react-router-dom";
 import "@/App.css";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
-import axios from "axios";
-import { HOME } from "@/constants/testIds";
+import { Toaster } from "@/components/ui/sonner";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import AppShell from "@/components/AppShell";
+import Landing from "@/pages/Landing";
+import NewScan from "@/pages/NewScan";
+import ScanProgress from "@/pages/ScanProgress";
+import ScanResults from "@/pages/ScanResults";
+import ExportsPage from "@/pages/ExportsPage";
+import History from "@/pages/History";
+import Handoff from "@/pages/Handoff";
+import SettingsPage from "@/pages/SettingsPage";
+import NotFound from "@/pages/NotFound";
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const API = `${BACKEND_URL}/api`;
-
-const Home = () => {
-  const helloWorldApi = async () => {
-    try {
-      const response = await axios.get(`${API}/`);
-      console.log(response.data.message);
-    } catch (e) {
-      console.error(e, `errored out requesting / api`);
-    }
-  };
-
+function App() {
   useEffect(() => {
-    helloWorldApi();
+    document.title = "Bloat Guardian - agentic repository efficiency";
   }, []);
 
   return (
-    <div>
-      <header className="App-header">
-        <a
-          data-testid={HOME.emergentLink}
-          className="App-link"
-          href="https://emergent.sh"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <img src="https://avatars.githubusercontent.com/in/1201222?s=120&u=2686cf91179bbafbc7a71bfbc43004cf9ae1acea&v=4" />
-        </a>
-        <p className="mt-5">Building something incredible ~!</p>
-      </header>
-    </div>
-  );
-};
-
-function App() {
-  return (
-    <div className="App">
+    <TooltipProvider delayDuration={200}>
       <BrowserRouter>
-        <Routes>
-          <Route path="/" element={<Home />}>
-            <Route index element={<Home />} />
-          </Route>
-        </Routes>
+        <AppShell>
+          <Routes>
+            <Route path="/" element={<Landing />} />
+            <Route path="/scan/new" element={<NewScan />} />
+            <Route path="/scan/:scanId/progress" element={<ScanProgress />} />
+            <Route path="/scan/:scanId/exports" element={<ExportsPage />} />
+            <Route path="/scan/:scanId/handoff" element={<Handoff />} />
+            <Route path="/scan/:scanId" element={<ScanResults />} />
+            <Route path="/history" element={<History />} />
+            <Route path="/settings" element={<SettingsPage />} />
+            <Route path="*" element={<NotFound />} />
+          </Routes>
+        </AppShell>
       </BrowserRouter>
-    </div>
+      <Toaster position="top-right" richColors />
+    </TooltipProvider>
   );
 }
 

@@ -138,6 +138,50 @@ def _looks_binary(blob: bytes) -> bool:
     return False
 
 
+def inventory_from_entries(entries: list) -> Inventory:
+    """Build an inventory from in-memory entries.
+
+    Each entry is either {"path", "content"} for a parsed text file, or
+    {"path", "size_bytes", "parse_status", "skip_reason"} for a skipped/binary asset.
+    """
+    inv = Inventory()
+    for entry in entries:
+        rel = entry["path"].replace("\\", "/")
+        ext = os.path.splitext(rel)[1].lower()
+        category = classify(rel)
+        rec = FileRecord(
+            path=rel, extension=ext, category=category,
+            inventory_group=inventory_group_for(category, ext),
+            size_bytes=int(entry.get("size_bytes") or 0),
+            agent_like=category in AGENT_LIKE_CATEGORIES,
+        )
+        if "content" in entry and entry.get("parse_status", "Scanned") == "Scanned":
+            text = entry["content"]
+            rec.size_bytes = len(text.encode("utf-8"))
+            rec.line_count = text.count("\n") + (1 if text and not text.endswith("\n") else 0)
+            rec.estimated_tokens = estimate_tokens(len(text))
+            clipped = text[:MAX_RETAINED_CHARS_PER_FILE]
+            rec.norm = normalise(clipped)
+            if category in AGENT_LIKE_CATEGORIES or ext in DOC_EXTENSIONS:
+                rec.content = clipped
+            rec.parse_status = "Scanned"
+        else:
+            rec.parse_status = entry.get("parse_status") or "SkippedUnsupported"
+            rec.skip_reason = entry.get("skip_reason") or "Not analysed"
+        inv.files.append(rec)
+
+    inv.total_files = len(inv.files)
+    inv.parsed_files = sum(1 for f in inv.files if f.parse_status == "Scanned")
+    inv.skipped_files = inv.total_files - inv.parsed_files
+    inv.analyzed_tokens = sum(f.estimated_tokens for f in inv.files if f.parse_status == "Scanned")
+    reasons: dict = {}
+    for f in inv.files:
+        if f.parse_status != "Scanned":
+            reasons[f.parse_status] = reasons.get(f.parse_status, 0) + 1
+    inv.skip_reasons = reasons
+    return inv
+
+
 def build_inventory(root_dir: str, progress_cb=None) -> Inventory:
     inv = Inventory()
     all_paths: list = []

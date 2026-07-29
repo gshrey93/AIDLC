@@ -1,0 +1,82 @@
+"""Mongo access layer."""
+from __future__ import annotations
+
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+
+from dotenv import load_dotenv
+from motor.motor_asyncio import AsyncIOMotorClient
+
+ROOT_DIR = Path(__file__).parent
+load_dotenv(ROOT_DIR / ".env")
+
+MONGO_URL = os.environ["MONGO_URL"]
+DB_NAME = os.environ.get("DB_NAME", "bloat_guardian")
+
+client = AsyncIOMotorClient(MONGO_URL)
+db = client[DB_NAME]
+
+scans = db.scans
+file_assets = db.file_assets
+issues = db.issues
+category_scores = db.category_scores
+drafts = db.recommendation_drafts
+export_jobs = db.export_jobs
+app_settings = db.app_settings
+users = db.users
+
+DEMO_USER_ID = "USR-DEMO-0001"
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def serialize(doc):
+    """Recursively make a Mongo document JSON-safe."""
+    if doc is None:
+        return None
+    if isinstance(doc, list):
+        return [serialize(d) for d in doc]
+    if isinstance(doc, dict):
+        return {k: serialize(v) for k, v in doc.items() if k != "_id"}
+    if isinstance(doc, datetime):
+        if doc.tzinfo is None:
+            doc = doc.replace(tzinfo=timezone.utc)
+        return doc.isoformat()
+    return doc
+
+
+async def ensure_indexes():
+    await scans.create_index("id", unique=True)
+    await scans.create_index([("created_at", -1)])
+    await file_assets.create_index("scan_id")
+    await file_assets.create_index([("scan_id", 1), ("estimated_tokens", -1)])
+    await issues.create_index("scan_id")
+    await category_scores.create_index("scan_id")
+    await drafts.create_index("scan_id")
+    await export_jobs.create_index("scan_id")
+    await users.create_index("id", unique=True)
+
+
+async def ensure_demo_user():
+    existing = await users.find_one({"id": DEMO_USER_ID})
+    if not existing:
+        await users.insert_one({
+            "id": DEMO_USER_ID,
+            "display_name": "Demo Builder",
+            "created_at": utcnow(),
+        })
+    return await users.find_one({"id": DEMO_USER_ID})
+
+
+async def next_scan_id(when: datetime | None = None) -> str:
+    when = when or utcnow()
+    prefix = f"SCN-{when.strftime('%Y-%m-%d')}-"
+    count = await scans.count_documents({"id": {"$regex": f"^{prefix}"}})
+    for i in range(count + 1, count + 500):
+        candidate = f"{prefix}{i:04d}"
+        if not await scans.find_one({"id": candidate}):
+            return candidate
+    return f"{prefix}{count + 1:04d}"

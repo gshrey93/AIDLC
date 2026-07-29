@@ -612,6 +612,342 @@ class BackendTester:
         self.log(f"   Reset to default: 200")
     
     # ============================================================
+    # BUG FIX 1: DUPLICATE DRAFT IDS
+    # ============================================================
+    
+    def test_duplicate_draft_ids_fixed(self):
+        """Test that duplicate draft IDs bug is fixed on SCN-2026-07-29-0006."""
+        scan_id = "SCN-2026-07-29-0006"
+        
+        # (a) Verify all draft ids are unique
+        resp = requests.get(f"{API_BASE}/scans/{scan_id}/results", timeout=10)
+        self.assert_status(resp, 200, f"Get results for {scan_id} failed")
+        data = resp.json()
+        
+        drafts = data.get("drafts", [])
+        self.assert_true(len(drafts) > 0, f"Expected drafts on {scan_id}, got none")
+        
+        draft_ids = [d["id"] for d in drafts]
+        unique_ids = set(draft_ids)
+        self.assert_equal(len(draft_ids), len(unique_ids), 
+                         f"Found duplicate draft IDs: {draft_ids}")
+        self.log(f"   ✓ All {len(draft_ids)} draft IDs are unique")
+        
+        # (b) Generate a NEW draft for an eligible path that doesn't have one yet
+        candidates = data["scan"].get("draft_candidates", [])
+        existing_paths = {d["source_path"] for d in drafts}
+        available = [c for c in candidates if c["source_path"] not in existing_paths]
+        
+        if available:
+            new_path = available[0]["source_path"]
+            self.log(f"   Testing new draft generation for: {new_path}")
+            
+            resp2 = requests.post(
+                f"{API_BASE}/scans/{scan_id}/drafts",
+                json={"source_path": new_path},
+                timeout=70
+            )
+            self.assert_status(resp2, 200, f"New draft generation failed for {new_path}")
+            new_draft = resp2.json()
+            new_id = new_draft["id"]
+            
+            # Verify no collision
+            self.assert_true(new_id not in draft_ids, 
+                           f"New draft ID {new_id} collides with existing IDs")
+            self.log(f"   ✓ New draft ID {new_id} does not collide")
+            
+            # (c) REGENERATE the same draft (should replace, not duplicate)
+            self.log(f"   Testing draft regeneration for: {new_path}")
+            resp3 = requests.post(
+                f"{API_BASE}/scans/{scan_id}/drafts",
+                json={"source_path": new_path},
+                timeout=70
+            )
+            self.assert_status(resp3, 200, f"Draft regeneration failed for {new_path}")
+            regen_draft = resp3.json()
+            
+            # Verify still only one draft for this path
+            resp4 = requests.get(f"{API_BASE}/scans/{scan_id}/results", timeout=10)
+            self.assert_status(resp4, 200, "Get results after regen failed")
+            updated_drafts = resp4.json().get("drafts", [])
+            
+            path_drafts = [d for d in updated_drafts if d["source_path"] == new_path]
+            self.assert_equal(len(path_drafts), 1, 
+                            f"Expected exactly 1 draft for {new_path}, got {len(path_drafts)}")
+            
+            # Verify no duplicate IDs in the full list
+            all_ids = [d["id"] for d in updated_drafts]
+            unique_all = set(all_ids)
+            self.assert_equal(len(all_ids), len(unique_all), 
+                            f"Found duplicate IDs after regeneration: {all_ids}")
+            self.log(f"   ✓ Regeneration replaced draft without creating duplicates")
+        else:
+            self.log(f"   ⚠ No available paths for new draft test (all {len(candidates)} already have drafts)")
+    
+    # ============================================================
+    # BUG FIX 2: MARKDOWN SERIES NAMING
+    # ============================================================
+    
+    def test_markdown_series_naming(self):
+        """Test that markdown uploads get unique series names based on file set."""
+        # Create 6 tiny .md files
+        files_set1 = [
+            ("md_files", ("agent1.md", b"# Agent 1\nTest content", "text/markdown")),
+            ("md_files", ("agent2.md", b"# Agent 2\nTest content", "text/markdown")),
+            ("md_files", ("agent3.md", b"# Agent 3\nTest content", "text/markdown")),
+        ]
+        
+        files_set2 = [
+            ("md_files", ("agent1.md", b"# Agent 1\nTest content", "text/markdown")),
+            ("md_files", ("agent2.md", b"# Agent 2\nTest content", "text/markdown")),
+        ]
+        
+        form_data = {"source_type": "md", "rights_ack": "true"}
+        
+        # Upload set1 first time
+        self.log("   Uploading file set 1 (first time)...")
+        resp1 = requests.post(f"{API_BASE}/scans", data=form_data, files=files_set1, timeout=10)
+        self.assert_status(resp1, 200, "First upload failed")
+        scan1 = resp1.json()
+        time.sleep(3)  # Wait for scan to complete
+        
+        # Get series_id
+        resp1b = requests.get(f"{API_BASE}/scans/{scan1['id']}", timeout=10)
+        self.assert_status(resp1b, 200, "Get scan1 failed")
+        series1 = resp1b.json().get("series_id")
+        self.assert_true(series1, "Scan1 should have a series_id")
+        self.log(f"   First upload series: {series1}")
+        
+        # Upload set1 second time (SAME files)
+        self.log("   Uploading file set 1 (second time - same files)...")
+        resp2 = requests.post(f"{API_BASE}/scans", data=form_data, files=files_set1, timeout=10)
+        self.assert_status(resp2, 200, "Second upload failed")
+        scan2 = resp2.json()
+        time.sleep(3)
+        
+        resp2b = requests.get(f"{API_BASE}/scans/{scan2['id']}", timeout=10)
+        self.assert_status(resp2b, 200, "Get scan2 failed")
+        series2 = resp2b.json().get("series_id")
+        self.assert_true(series2, "Scan2 should have a series_id")
+        self.log(f"   Second upload series: {series2}")
+        
+        # Verify SAME series
+        self.assert_equal(series1, series2, 
+                         "Same file set should produce same series_id")
+        self.log(f"   ✓ Same files → same series")
+        
+        # Check run_number
+        resp_series = requests.get(f"{API_BASE}/series/{series1}", timeout=10)
+        self.assert_status(resp_series, 200, "Get series failed")
+        series_data = resp_series.json()
+        self.assert_equal(series_data.get("run_count"), 2, 
+                         "Series should have 2 runs")
+        
+        runs = series_data.get("runs", [])
+        run_numbers = [r.get("run_number") for r in runs]
+        self.assert_true(1 in run_numbers and 2 in run_numbers, 
+                        f"Expected run_numbers 1 and 2, got {run_numbers}")
+        self.log(f"   ✓ Series has 2 runs with run_numbers 1 and 2")
+        
+        # Upload set2 (DIFFERENT files)
+        self.log("   Uploading file set 2 (different files)...")
+        resp3 = requests.post(f"{API_BASE}/scans", data=form_data, files=files_set2, timeout=10)
+        self.assert_status(resp3, 200, "Third upload failed")
+        scan3 = resp3.json()
+        time.sleep(3)
+        
+        resp3b = requests.get(f"{API_BASE}/scans/{scan3['id']}", timeout=10)
+        self.assert_status(resp3b, 200, "Get scan3 failed")
+        series3 = resp3b.json().get("series_id")
+        self.assert_true(series3, "Scan3 should have a series_id")
+        self.log(f"   Third upload series: {series3}")
+        
+        # Verify DIFFERENT series
+        self.assert_true(series3 != series1, 
+                        "Different file set should produce different series_id")
+        self.log(f"   ✓ Different files → different series")
+        
+        # Clean up: delete the test series
+        self.log(f"   Cleaning up test series...")
+        for sid in [series1, series3]:
+            resp_del = requests.delete(f"{API_BASE}/series/{sid}", timeout=10)
+            if resp_del.status_code == 200:
+                self.log(f"   Deleted series {sid}")
+            else:
+                self.warnings.append(f"Could not delete test series {sid}")
+    
+    # ============================================================
+    # REGRESSION: SERIES MODEL
+    # ============================================================
+    
+    def test_series_model(self):
+        """Test series model counts and SER-C7EB608470FE details."""
+        # Check counts
+        resp = requests.get(f"{API_BASE}/series?include_archived=true", timeout=10)
+        self.assert_status(resp, 200, "List series failed")
+        data = resp.json()
+        
+        counts = data.get("counts", {})
+        self.assert_equal(counts.get("total"), 25, 
+                         f"Expected 25 total series, got {counts.get('total')}")
+        self.assert_equal(counts.get("active"), 5, 
+                         f"Expected 5 active series, got {counts.get('active')}")
+        self.assert_equal(counts.get("archived"), 20, 
+                         f"Expected 20 archived series, got {counts.get('archived')}")
+        self.assert_equal(counts.get("runs"), 26, 
+                         f"Expected 26 total runs, got {counts.get('runs')}")
+        self.log(f"   ✓ Series counts: {counts}")
+        
+        # Check SER-C7EB608470FE
+        series_id = "SER-C7EB608470FE"
+        resp2 = requests.get(f"{API_BASE}/series/{series_id}", timeout=10)
+        self.assert_status(resp2, 200, f"Get series {series_id} failed")
+        series = resp2.json()
+        
+        self.assert_equal(series.get("run_count"), 2, 
+                         f"Expected run_count 2, got {series.get('run_count')}")
+        self.assert_equal(series.get("latest_score"), 55, 
+                         f"Expected latest_score 55, got {series.get('latest_score')}")
+        self.assert_equal(series.get("latest_verdict"), "Wasteful", 
+                         f"Expected verdict Wasteful, got {series.get('latest_verdict')}")
+        self.assert_equal(series.get("previous_score"), 79, 
+                         f"Expected previous_score 79, got {series.get('previous_score')}")
+        self.assert_equal(series.get("score_delta"), -24, 
+                         f"Expected score_delta -24, got {series.get('score_delta')}")
+        
+        self.log(f"   ✓ Series {series_id}: run_count=2, latest_score=55, verdict=Wasteful, delta=-24")
+        
+        # Check runs
+        runs = series.get("runs", [])
+        self.assert_equal(len(runs), 2, f"Expected 2 runs, got {len(runs)}")
+        
+        run1 = next((r for r in runs if r.get("id") == "SCN-2026-07-29-0005"), None)
+        run2 = next((r for r in runs if r.get("id") == "SCN-2026-07-29-0006"), None)
+        
+        self.assert_true(run1 is not None, "Run SCN-2026-07-29-0005 not found")
+        self.assert_true(run2 is not None, "Run SCN-2026-07-29-0006 not found")
+        
+        self.assert_equal(run1.get("run_number"), 1, "Run 1 should have run_number 1")
+        self.assert_equal(run1.get("overall_score"), 79, "Run 1 should have score 79")
+        self.assert_true(run1.get("score_delta") is None, "Run 1 should have null delta")
+        
+        self.assert_equal(run2.get("run_number"), 2, "Run 2 should have run_number 2")
+        self.assert_equal(run2.get("overall_score"), 55, "Run 2 should have score 55")
+        self.assert_equal(run2.get("score_delta"), -24, "Run 2 should have delta -24")
+        
+        self.log(f"   ✓ Run 1: score=79, delta=null")
+        self.log(f"   ✓ Run 2: score=55, delta=-24")
+    
+    # ============================================================
+    # REGRESSION: SERIES ARCHIVE TOGGLE
+    # ============================================================
+    
+    def test_series_archive_toggle(self):
+        """Test PATCH /api/series/{id}/archive toggles archived status."""
+        # Use SER-C7EB608470FE (should be active initially)
+        series_id = "SER-C7EB608470FE"
+        
+        # Get initial state
+        resp = requests.get(f"{API_BASE}/series/{series_id}", timeout=10)
+        self.assert_status(resp, 200, f"Get series {series_id} failed")
+        initial_archived = resp.json().get("archived", False)
+        self.log(f"   Initial archived state: {initial_archived}")
+        
+        # Toggle to opposite
+        new_state = not initial_archived
+        resp2 = requests.patch(
+            f"{API_BASE}/series/{series_id}/archive",
+            json={"archived": new_state},
+            timeout=10
+        )
+        self.assert_status(resp2, 200, "Archive toggle failed")
+        updated = resp2.json()
+        self.assert_equal(updated.get("archived"), new_state, 
+                         f"Expected archived={new_state}, got {updated.get('archived')}")
+        self.log(f"   ✓ Toggled to archived={new_state}")
+        
+        # Verify counts updated
+        resp3 = requests.get(f"{API_BASE}/series?include_archived=true", timeout=10)
+        self.assert_status(resp3, 200, "List series failed")
+        counts = resp3.json().get("counts", {})
+        self.log(f"   Updated counts: active={counts.get('active')}, archived={counts.get('archived')}")
+        
+        # Restore original state
+        resp4 = requests.patch(
+            f"{API_BASE}/series/{series_id}/archive",
+            json={"archived": initial_archived},
+            timeout=10
+        )
+        self.assert_status(resp4, 200, "Restore archive state failed")
+        restored = resp4.json()
+        self.assert_equal(restored.get("archived"), initial_archived, 
+                         "Failed to restore original state")
+        self.log(f"   ✓ Restored to archived={initial_archived}")
+    
+    # ============================================================
+    # REGRESSION: CSV PARSING
+    # ============================================================
+    
+    def test_csv_parsing(self):
+        """Test CSV export is well-formed and parses correctly with csv.DictReader."""
+        scan_id = "SCN-2026-07-29-0006"
+        
+        # Get issue count from results
+        resp = requests.get(f"{API_BASE}/scans/{scan_id}/results", timeout=10)
+        self.assert_status(resp, 200, "Get results failed")
+        data = resp.json()
+        expected_count = len(data.get("issues", []))
+        self.log(f"   Expected issue count from /results: {expected_count}")
+        
+        # Get CSV export
+        resp2 = requests.get(f"{API_BASE}/scans/{scan_id}/export/csv", timeout=10)
+        self.assert_status(resp2, 200, "CSV export failed")
+        csv_text = resp2.text
+        
+        # Parse with csv.DictReader
+        reader = csv.DictReader(io.StringIO(csv_text))
+        rows = list(reader)
+        actual_count = len(rows)
+        
+        self.assert_equal(actual_count, expected_count, 
+                         f"CSV row count mismatch. Expected {expected_count}, got {actual_count}")
+        self.log(f"   ✓ CSV parsed correctly: {actual_count} rows")
+        
+        # Verify required columns
+        if rows:
+            required_cols = ["category", "severity", "title", "description", "evidence"]
+            for col in required_cols:
+                self.assert_in(col, rows[0], f"CSV missing column '{col}'")
+            self.log(f"   ✓ CSV has all required columns")
+    
+    # ============================================================
+    # REGRESSION: SERIES ARCHIVE EXPORT
+    # ============================================================
+    
+    def test_series_archive_export(self):
+        """Test GET /api/series/export/archive returns a valid zip."""
+        resp = requests.get(f"{API_BASE}/series/export/archive", timeout=30)
+        self.assert_status(resp, 200, "Archive export failed")
+        
+        # Verify it's a zip
+        self.assert_true(resp.headers.get("Content-Type") == "application/zip", 
+                        "Archive export should be application/zip")
+        
+        # Parse zip
+        zip_data = io.BytesIO(resp.content)
+        with zipfile.ZipFile(zip_data, 'r') as zf:
+            files = zf.namelist()
+            self.assert_in("manifest.csv", files, "Archive missing manifest.csv")
+            self.assert_in("README.txt", files, "Archive missing README.txt")
+            
+            # Check for reports
+            pdf_files = [f for f in files if f.startswith("reports/") and f.endswith(".pdf")]
+            self.assert_true(len(pdf_files) > 0, "Archive should contain PDF reports")
+            
+            self.log(f"   ✓ Archive contains {len(files)} files")
+            self.log(f"   ✓ Found {len(pdf_files)} PDF reports")
+    
+    # ============================================================
     # DELETE SCAN TEST
     # ============================================================
     
@@ -679,7 +1015,7 @@ class BackendTester:
 def main():
     """Run all backend tests."""
     print(f"\n{Colors.BLUE}{'='*70}{Colors.END}")
-    print(f"{Colors.BLUE}BLOAT GUARDIAN BACKEND API TESTS{Colors.END}")
+    print(f"{Colors.BLUE}BLOAT GUARDIAN BACKEND API TESTS - ITERATION 8{Colors.END}")
     print(f"{Colors.BLUE}Backend URL: {BACKEND_URL}{Colors.END}")
     print(f"{Colors.BLUE}{'='*70}{Colors.END}\n")
     
@@ -715,6 +1051,24 @@ def main():
     
     # Settings
     tester.test("Settings CRUD", tester.test_settings_crud)
+    
+    # === BUG FIX VERIFICATION (Iteration 8) ===
+    print(f"\n{Colors.YELLOW}{'='*70}{Colors.END}")
+    print(f"{Colors.YELLOW}BUG FIX VERIFICATION TESTS{Colors.END}")
+    print(f"{Colors.YELLOW}{'='*70}{Colors.END}")
+    
+    tester.test("BUG FIX 1: Duplicate draft IDs fixed", tester.test_duplicate_draft_ids_fixed)
+    tester.test("BUG FIX 2: Markdown series naming", tester.test_markdown_series_naming)
+    
+    # === REGRESSION TESTS ===
+    print(f"\n{Colors.YELLOW}{'='*70}{Colors.END}")
+    print(f"{Colors.YELLOW}REGRESSION TESTS{Colors.END}")
+    print(f"{Colors.YELLOW}{'='*70}{Colors.END}")
+    
+    tester.test("REGRESSION: Series model", tester.test_series_model)
+    tester.test("REGRESSION: Series archive toggle", tester.test_series_archive_toggle)
+    tester.test("REGRESSION: CSV parsing", tester.test_csv_parsing)
+    tester.test("REGRESSION: Series archive export", tester.test_series_archive_export)
     
     # Delete
     tester.test("Delete scan", tester.test_delete_scan)

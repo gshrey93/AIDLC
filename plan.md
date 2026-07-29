@@ -206,3 +206,102 @@ expired, re-run the scan" even though the 7 day window is still open. The user-f
 clear message rather than an error, so this is a graceful degradation. Proper fixes, for a later
 phase: put imported content in object storage, or store the source text of the draft candidates in
 Mongo at scan time (they are capped at 25 files, so the cost is small).
+
+---
+
+## Code review response
+
+### Critical: undefined variables (both fixed)
+`server.py` archive export and `write_settings` assigned inside a `try` whose `except` always
+raises, so neither could actually be unbound. Both were restructured anyway so static analysis can
+see it: the archive export now returns inside the `try`, and the bare `updated: dict` annotation
+was removed.
+
+### Anti-pattern: `is` versus `==` (not applied, all 18 are false positives)
+Every one of the 18 flagged lines across `settings_store.py`, `server.py`, `series.py`, `seed.py`,
+`db.py`, `core/importer.py`, `core/exports.py` and `core/config.py` is a singleton comparison:
+`is None`, `is not None`, or `doc.tzinfo is None`. Not one compares a string or numeric literal.
+The review's own rule says to keep `is` for singletons, so changing these to `==` would have been
+wrong: `!= None` is both non-idiomatic and unsafe for any object overriding `__eq__`. Verified by
+grepping every ` is ` and ` is not ` occurrence in those eight files.
+
+### Complexity (all six refactored, with proof of no behaviour change)
+| Function | Before | After |
+| --- | --- | --- |
+| `analyzer.analyze` | CC 88, 521 lines, 83 locals | **CC 10, ~45 lines** |
+| `exports._common_sections` | CC 57, 204 lines | **CC 2** (12 section functions) |
+| `drafts.select_draft_targets` | CC 25 | **CC 4** |
+| `exports.efficiency_summary_md` | CC 18 | **CC 4** |
+| `classifier.inventory_from_entries` | CC 15 | **CC 4** |
+| `drafts.generate_draft` | CC 14, 81 lines | **CC 4** |
+
+`analyze()` is now a pipeline: `_group_files` -> `_detect_all` -> `_tier1_penalties` ->
+`_compute_metrics` -> `_collect_issues` (eight `_find_*` builders behind a `FINDING_BUILDERS`
+tuple, so issue ids stay in order) -> assembly helpers (`_build_savings`,
+`_build_category_scores`, `_build_top_drivers`, `_build_actions`, `_build_penalty_ledger`,
+`_build_assumptions_block`, `_build_detections`). Shared state moved into the `_Groups`,
+`_Detections`, `_Tier1`, `_Metrics` and `_Findings` dataclasses; the `add_issue` and `to_credits`
+closures became the `_IssueLog` and `_Money` classes. `_common_sections` became one function per
+report section driven by a `PDF_SECTIONS` tuple, with redaction folded into a `_Ctx` helper so the
+`redact_text(...) if redacted else ...` ternary is not repeated eleven times.
+
+The delicate heuristic arithmetic that the previous agent flagged as risky was preserved exactly.
+
+### How the refactor was made safe
+`/app/tests/golden_snapshot.py` records a behavioural fingerprint over five fixtures (one per
+verdict band plus a markdown-only case), built in memory from the deterministic seed generator so
+it needs no network or database. It captures the entire `analyze()` dict (scores, verdict, every
+issue, penalty ledger, detections, savings, clusters, drivers, actions), the file inventory, the
+draft targets, the plain and redacted findings CSVs, the efficiency summary markdown, the handoff
+prompt, and a structural fingerprint of the reportlab PDF story taken by walking the flowables and
+reading paragraph text and table cells, which checks PDF content without being disturbed by
+embedded timestamps.
+
+    python tests/golden_snapshot.py --write   # before refactoring
+    python tests/golden_snapshot.py --check   # after
+
+The harness was mutation-tested first: a one-word change to an export was detected, so it is not
+blind. It reported IDENTICAL after every single refactor step. `test_core.py` stayed at 59/59.
+
+### Remaining C-grade functions, deliberately left alone
+`detect_architecture` (13), `_build_duplicate_clusters` (13), `detect_repeated_blocks` (12),
+`detect_review_stages` (11) and `print_view_html` (13) were not in the review and are cohesive
+single-purpose detectors. `_group_files` (15) and `_sec_skipped` (12) are new but linear; radon
+counts each list comprehension as a branch, which inflates them.
+
+---
+
+## User-reported 403 on scanning in preview
+
+**Scanning does work in preview.** Reproduced the full flow rather than assuming: `POST /api/scans`
+returned 200 for both zip and GitHub, a zip scan driven through the browser UI completed to
+82 files / 79 / Watchlist, a GitHub scan of `humanlayer/12-factor-agents` completed, and a sweep of
+every app and API route returned 200 with no 403 anywhere. The testing agent independently confirmed
+both scan flows complete in preview with no 403.
+
+The one failing request in the browser is `POST /cdn-cgi/rum`, Cloudflare's monitoring beacon
+injected by the preview proxy. It is not ours, it always aborts, and it has no effect on the app.
+
+**What the 403 almost certainly was:** GitHub allows 60 unauthenticated API requests per hour per IP
+and the preview container shares its IP, so a burst of GitHub scans exhausts it and GitHub replies
+403. That is GitHub throttling, not the preview environment blocking the app.
+
+**Bug found while investigating.** A 403 that was not recognised as throttling fell through to
+`GitHubRepoUnavailable: "GitHub returned HTTP 403"`, which wrongly implies the repository does not
+exist when the real cause is usually a temporary throttle or a private repository. Fixed in
+`core/importer.py`:
+- `_is_rate_limited` now also treats a 403 as throttling when `Retry-After` is present (GitHub's
+  *secondary* rate limit keeps `x-ratelimit-remaining` above zero, so the old check missed it) or
+  when the body mentions abuse detection.
+- A genuine access-denied 403 raises the new `GitHubAccessDenied` with an actionable message
+  covering private/blocked repositories, the 60-per-hour limit, adding a token in Settings, or
+  uploading a zip. Bitbucket's 403 and 404 were also separated (`BitbucketAccessDenied`).
+- Both codes registered in `scanner.IMPORT_ERROR_CODES` and given help text in `format.js`.
+
+Verified by a truth table over the classifier (429, 403 quota exhausted, 403 secondary limit, 403
+abuse detection, 403 rate-limit body all throttle; 403 private repo, 404 and 200 do not) and by
+confirming a non-existent repo still reports the 404 path. Testing agent iteration 9: 100% pass,
+no critical bugs, 26/26 API tests, 14/14 unit tests, golden snapshot IDENTICAL.
+
+**Recommendation for the user:** add a GitHub personal access token in Settings. It lifts the limit
+from 60 to 5,000 requests per hour and makes GitHub scanning reliable.

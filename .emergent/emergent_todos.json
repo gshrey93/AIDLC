@@ -12,27 +12,31 @@
     "status": "completed"
   },
   {
-    "content": "Refactor core/classifier.py inventory_from_entries - output identical",
+    "content": "Refactor core/classifier.py inventory_from_entries: CC 15 -> 4",
     "status": "completed"
   },
   {
-    "content": "Refactor core/drafts.py select_draft_targets + generate_draft - output identical",
+    "content": "Refactor core/drafts.py select_draft_targets CC 25 -> 4, generate_draft CC 14 -> 4",
     "status": "completed"
   },
   {
-    "content": "Refactor core/exports.py _common_sections + efficiency_summary_md - output identical",
+    "content": "Refactor core/exports.py _common_sections CC 57 -> 2, efficiency_summary_md CC 18 -> 4",
     "status": "completed"
   },
   {
-    "content": "Refactor core/analyzer.py analyze() (CC 88, 521 lines, 83 locals) into staged helpers",
-    "status": "in_progress"
+    "content": "Refactor core/analyzer.py analyze(): CC 88 -> 10, 521 lines -> ~45",
+    "status": "completed"
   },
   {
-    "content": "Verify: golden snapshots identical, test_core.py 59/59, esbuild clean",
-    "status": "pending"
+    "content": "Investigate user's 403 report: could not reproduce; found + fixed misleading 403 classification in importer",
+    "status": "completed"
   },
   {
-    "content": "Call testing_agent to independently verify no behaviour regression",
-    "status": "pending"
+    "content": "Verify: golden snapshot IDENTICAL, test_core.py 59/59, esbuild clean",
+    "status": "completed"
+  },
+  {
+    "content": "testing_agent iteration 9: 100% pass, no critical bugs, refactor confirmed behaviour-preserving",
+    "status": "completed"
   }
 ]

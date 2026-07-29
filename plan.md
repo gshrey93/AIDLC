@@ -305,3 +305,49 @@ no critical bugs, 26/26 API tests, 14/14 unit tests, golden snapshot IDENTICAL.
 
 **Recommendation for the user:** add a GitHub personal access token in Settings. It lifts the limit
 from 60 to 5,000 requests per hour and makes GitHub scanning reliable.
+
+---
+
+## Deployment failure fixed: unprefixed /health probe
+
+The deployment logs were flooded with `127.0.0.1 - "GET /health HTTP/1.0" 404 Not Found` every one to
+two seconds. The container's liveness/readiness probe calls the **unprefixed** `/health` directly on
+the backend on loopback, but every route in this app sits on an `APIRouter(prefix="/api")`, so only
+`/api/health` existed. The probe therefore never succeeded and the deployment never went healthy.
+
+Fix in `server.py`, registered on the FastAPI app itself rather than the router, after
+`app.include_router(api)`:
+
+    @app.get("/health")
+    @app.get("/healthz")
+    async def container_health():
+        return {"status": "ok"}
+
+`/health`, `/healthz` and the original `/api/health` all return 200. Deployment agent re-run:
+**PASS, zero findings**, including the Atlas-specific checks (startup index creation, the
+`series.backfill()` migration and the retention loop are all safe against Atlas and cannot block
+startup past the probe deadline).
+
+Note on the testing agent's "critical" flag: it observed that the *public* URL `/health` returns the
+frontend HTML, because the ingress sends everything that is not `/api/*` to the frontend. That is by
+design and irrelevant here: the probe in the logs originates from `127.0.0.1` against the backend
+container directly, which is exactly the path that now returns 200. No ingress change is needed, and
+infrastructure is out of scope anyway.
+
+## Bitbucket "validation error" - not a private repo problem
+
+The frontend regexes in `format.js` only accepted a bare `https://bitbucket.org/workspace/repo`,
+while the backend parsers in `core/importer.py` had always accepted richer forms. A URL copied from
+the browser normally looks like `https://bitbucket.org/team/repo/src/main/`, so the client rejected
+it **before any network request was made** - which is why it looked like an access problem but was
+not. Public versus private was never involved.
+
+`GITHUB_RE` and `BITBUCKET_RE` now mirror the backend patterns exactly: optional `www.`, `http` or
+`https`, an optional `.git` suffix, and an optional `/tree/<branch>` or `/src/<branch>` segment.
+`/api/config` advertises the relaxed patterns too. Verified with a 12-URL backend/frontend parity
+table plus 13 in-browser validation cases, and end to end:
+`https://bitbucket.org/tildeslash/monit/src/master/` is now accepted with `branch` correctly
+extracted as `master`.
+
+Testing agent iteration 10: URL validation 13/13, end-to-end scans 100%, regressions 100%,
+`test_core.py` 59/59, golden snapshot IDENTICAL.

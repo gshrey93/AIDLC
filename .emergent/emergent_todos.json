@@ -1,0 +1,34 @@
+[
+  {
+    "content": "Phase 1: Get integration playbook for claude-opus-4-7 via Emergent LLM key",
+    "status": "completed"
+  },
+  {
+    "content": "Phase 1: Write single POC script /app/test_core.py covering GitHub import, Bitbucket import, zip extraction, analyzer/scoring, LLM draft, PDF/CSV/ZIP exports",
+    "status": "completed"
+  },
+  {
+    "content": "Phase 1: Run POC and fix until ALL paths pass (all 6 user stories) - 58/58 PASSED",
+    "status": "completed"
+  },
+  {
+    "content": "Phase 2: Get design guidelines from design_agent",
+    "status": "in_progress"
+  },
+  {
+    "content": "Phase 2: Backend implementation (FastAPI, Mongo, analyzer engine, imports, exports, settings, seed)",
+    "status": "pending"
+  },
+  {
+    "content": "Phase 2: Frontend implementation (7 surfaces, all states, exports, settings)",
+    "status": "pending"
+  },
+  {
+    "content": "Phase 2: All user stories covered in development",
+    "status": "pending"
+  },
+  {
+    "content": "Phase 2: End to End Testing using testing_agent_v3 + fix all bugs",
+    "status": "pending"
+  }
+]

@@ -17,6 +17,10 @@ export const endpoints = {
   overview: () => api.get("/stats/overview"),
   me: () => api.get("/me"),
   listScans: (params) => api.get("/scans", { params }),
+  listSeries: (params) => api.get("/series", { params }),
+  getSeries: (id) => api.get(`/series/${id}`),
+  setSeriesArchived: (id, archived) => api.patch(`/series/${id}/archive`, { archived }),
+  deleteSeries: (id) => api.delete(`/series/${id}`),
   getScan: (id) => api.get(`/scans/${id}`),
   getResults: (id) => api.get(`/scans/${id}/results`),
   getFiles: (id, params) => api.get(`/scans/${id}/files`, { params }),
@@ -38,7 +42,16 @@ export function printViewUrl(scanId, redacted) {
 
 export async function downloadExport(scanId, exportType, filename) {
   const res = await api.get(`/scans/${scanId}/export/${exportType}`, { responseType: "blob" });
-  const blobUrl = window.URL.createObjectURL(res.data);
+  triggerBlobDownload(res.data, filename);
+}
+
+export async function downloadArchiveBundle(filename) {
+  const res = await api.get("/series/export/archive", { responseType: "blob" });
+  triggerBlobDownload(res.data, filename);
+}
+
+function triggerBlobDownload(blob, filename) {
+  const blobUrl = window.URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = blobUrl;
   link.download = filename;

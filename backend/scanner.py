@@ -7,11 +7,12 @@ import os
 import shutil
 from datetime import timedelta
 
+import series as series_mod
 from core import importer
 from core.analyzer import analyze
 from core.classifier import build_inventory
 from core.drafts import MAX_DRAFTS, generate_draft, select_draft_targets
-from db import category_scores, drafts as drafts_col, file_assets, issues as issues_col, scans, utcnow
+from db import category_scores, drafts as drafts_col, file_assets, issues as issues_col, repo_series, scans, utcnow
 from settings_store import get_settings, resolve_llm_credentials
 
 log = logging.getLogger("bloatguardian.scanner")
@@ -28,6 +29,8 @@ STAGES = [
 
 CONTENT_RETENTION_DAYS = 7
 METADATA_RETENTION_DAYS = 30
+# Runs are grouped into series and kept indefinitely; the old "keep only the last 10 scans"
+# pruning rule was removed so a repository keeps its full run history.
 KEEP_RECENT_SCANS = 10
 
 IMPORT_ERROR_CODES = {
@@ -90,7 +93,15 @@ async def _fail(scan_id: str, status: str, code: str, message: str, retry_after:
         "completed_at": utcnow(),
         "updated_at": utcnow(),
     }})
+    scan = await scans.find_one({"id": scan_id}, {"series_id": 1})
+    if scan and scan.get("series_id"):
+        await series_mod.recompute_series(scan["series_id"])
     log.warning("scan %s failed: %s %s", scan_id, code, message)
+
+async def _recompute_for(scan_id: str) -> None:
+    scan = await scans.find_one({"id": scan_id}, {"series_id": 1})
+    if scan and scan.get("series_id"):
+        await series_mod.recompute_series(scan["series_id"])
 
 
 def _do_import(spec: dict, work_dir: str, settings: dict):
@@ -142,6 +153,17 @@ async def run_scan(scan_id: str, spec: dict):
         await _set_stage(scan_id, "importing", "done",
                          f"{imported.source_type} import complete"
                          + (f" ({imported.archive_bytes / 1048576:.1f} MB archive)" if imported.archive_bytes else ""))
+
+        # Bind the run to its repository series now that owner, name and branch are resolved.
+        # Zip and markdown uploads keep the uploaded name they were created with.
+        if spec["source_type"] in ("zip", "md"):
+            series_name = spec.get("repo_name") or imported.repo_name
+            series_owner, series_branch = None, None
+        else:
+            series_name = imported.repo_name
+            series_owner, series_branch = imported.repo_owner, imported.branch
+        await series_mod.attach_scan(
+            scan_id, spec["source_type"], series_owner, series_name, series_branch)
 
         # ------------------------------------------------- extract + classify
         await _set_stage(scan_id, "extracting", "running", "Walking the repository tree")
@@ -255,6 +277,7 @@ async def run_scan(scan_id: str, spec: dict):
                 "draft_status": "skipped",
                 "updated_at": utcnow(),
             }})
+            await _recompute_for(scan_id)
             return
 
         # ------------------------------------------------------------ drafts
@@ -311,6 +334,7 @@ async def run_scan(scan_id: str, spec: dict):
             "draft_errors": draft_errors[:10],
             "updated_at": utcnow(),
         }})
+        await _recompute_for(scan_id)
         log.info("scan %s completed score=%s verdict=%s", scan_id, analysis["overall_score"], analysis["verdict"])
     except Exception as exc:  # noqa: BLE001
         log.exception("scan %s crashed", scan_id)
@@ -368,7 +392,11 @@ async def generate_single_draft(scan_id: str, source_path: str) -> dict:
 
 # ------------------------------------------------------------- retention
 async def enforce_retention():
-    """7 day raw content retention, 30 day metadata retention, keep last 10 real scans."""
+    """7 day raw content retention, 30 day metadata retention.
+
+    The old "keep only the last 10 real scans" pruning rule was removed: runs now belong to a
+    repository series and the full run history is kept until the user deletes it.
+    """
     now = utcnow()
     removed_content, removed_scans = 0, 0
     async for scan in scans.find({"workspace_dir": {"$ne": None}}):
@@ -384,12 +412,6 @@ async def enforce_retention():
 
     stale = scans.find({"is_seed": {"$ne": True}, "metadata_expires_at": {"$lt": now}})
     async for scan in stale:
-        await delete_scan(scan["id"])
-        removed_scans += 1
-
-    keep_ids = [s["id"] async for s in scans.find({"is_seed": {"$ne": True}})
-                .sort("created_at", -1).limit(KEEP_RECENT_SCANS)]
-    async for scan in scans.find({"is_seed": {"$ne": True}, "id": {"$nin": keep_ids}}):
         await delete_scan(scan["id"])
         removed_scans += 1
     return {"content_purged": removed_content, "scans_purged": removed_scans}
@@ -408,4 +430,16 @@ async def delete_scan(scan_id: str) -> bool:
     await category_scores.delete_many({"scan_id": scan_id})
     await drafts_col.delete_many({"scan_id": scan_id})
     await scans.delete_one({"id": scan_id})
+    if scan.get("series_id"):
+        # Renumbers the remaining runs, or drops the series when it was the last one.
+        await series_mod.recompute_series(scan["series_id"])
     return True
+
+
+async def delete_series(series_id: str) -> int:
+    """Delete a whole series and every run inside it. Returns the number of runs removed."""
+    run_ids = [s["id"] async for s in scans.find({"series_id": series_id}, {"id": 1})]
+    for run_id in run_ids:
+        await delete_scan(run_id)
+    await repo_series.delete_one({"id": series_id})
+    return len(run_ids)

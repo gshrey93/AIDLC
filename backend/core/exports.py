@@ -748,3 +748,81 @@ def handoff_zip(payload: dict) -> bytes:
         for d in drafts:
             zf.writestr(f"drafts/{d.get('target_filename')}", d.get("draft_content") or "")
     return buf.getvalue()
+
+
+# ------------------------------------------------- archived series bundle
+ARCHIVE_MANIFEST_COLUMNS = [
+    "series_id", "display_name", "source_type", "repo_owner", "repo_name", "branch",
+    "run_count", "completed_run_count", "first_run_at", "latest_run_at", "latest_scan_id",
+    "latest_score", "latest_verdict", "previous_score", "score_delta", "best_score",
+    "estimated_monthly_credit_waste", "estimated_monthly_dollar_waste", "archived_at",
+    "report_file", "findings_file", "note",
+]
+
+ARCHIVE_README = """Bloat Guardian - archived series bundle
+=======================================
+
+This bundle contains one full PDF report and one findings CSV for the latest completed run of
+every archived repository series, plus a manifest.
+
+  manifest.csv   One row per archived series, with the score, verdict and delta versus the
+                 previous run, and the name of the matching report file.
+  reports/       Full PDF report for the latest completed run of each series.
+  findings/      Findings CSV for the same run.
+
+Series are keyed on source type, owner, repository name and branch, so main and develop are
+listed separately. Series with no completed run yet appear in the manifest with a note and no
+report file.
+"""
+
+
+def archive_slug(text: str, fallback: str = "series") -> str:
+    """Filesystem-safe, readable name for a bundle entry."""
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", (text or "").strip()).strip("-.")
+    return (cleaned or fallback)[:80]
+
+
+def archive_manifest_csv(rows: list) -> str:
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=ARCHIVE_MANIFEST_COLUMNS, extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({col: row.get(col, "") for col in ARCHIVE_MANIFEST_COLUMNS})
+    return buf.getvalue()
+
+
+def archive_bundle_zip(entries: list) -> bytes:
+    """Build the archived-series zip.
+
+    ``entries`` is a list of dicts with keys ``manifest`` (a row for manifest.csv) and, when the
+    series has a completed run, ``payload`` (the scan payload used to render the report).
+    """
+    manifest_rows = []
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for entry in entries:
+            row = dict(entry.get("manifest") or {})
+            payload = entry.get("payload")
+            if payload:
+                slug = archive_slug(
+                    f"{row.get('display_name') or 'series'}-{row.get('latest_scan_id') or ''}")
+                report_name = f"reports/{slug}-full-report.pdf"
+                findings_name = f"findings/{slug}-findings.csv"
+                try:
+                    zf.writestr(report_name, full_pdf(payload))
+                    zf.writestr(findings_name, issues_csv(payload))
+                    row["report_file"] = report_name
+                    row["findings_file"] = findings_name
+                except Exception as exc:  # noqa: BLE001 - one bad report must not kill the bundle
+                    row["report_file"] = ""
+                    row["findings_file"] = ""
+                    row["note"] = f"Report could not be generated: {exc}"
+            else:
+                row["report_file"] = ""
+                row["findings_file"] = ""
+                row.setdefault("note", "No completed run yet, so no report was included.")
+            manifest_rows.append(row)
+        zf.writestr("manifest.csv", archive_manifest_csv(manifest_rows))
+        zf.writestr("README.txt", ARCHIVE_README)
+        zf.writestr("generated-at.txt", datetime.now(timezone.utc).isoformat())
+    return buf.getvalue()

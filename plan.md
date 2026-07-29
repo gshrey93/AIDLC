@@ -76,3 +76,51 @@ motion, and A4 print styles.
 4. Batch draft generation with a progress indicator for all 25 eligible files.
 5. Saved assumption profiles, for example one per model vendor.
 6. Regression fixtures pinning penalty-cap arithmetic and partial-scan maths.
+
+---
+
+## Phase 4 — Repository series, run history and archive (Status: COMPLETED)
+
+### Data model
+`repo_series` is a new collection. A series is keyed on `source_type + owner + repo_name + branch`,
+so `main` and `develop` on the same repository are two independent rows. Zip and markdown uploads
+have no owner or branch, so they key on the uploaded file name: uploading `myday-2.0.zip` twice
+appends a second run instead of creating a second row.
+
+Every scan is now a *run* on a series. `scans` gained `series_id`, `series_key`, `run_number`,
+`previous_score` and `score_delta`. `series.py` owns the logic: `attach_scan` binds a run (and
+moves it if the branch is only resolved after the import), `recompute_series` renumbers runs and
+refreshes the rolled-up columns, and `backfill` is the idempotent migration.
+
+The migration ran on startup and attached all 24 pre-existing scans to 24 series, 20 of them the
+seeded demo series which start archived. `/api/scans/{id}` and every export link are unchanged.
+
+The old "keep only the last 10 real scans" pruning rule was removed. Content retention (7 days)
+and metadata retention (30 days) are unchanged.
+
+### API
+`GET /api/series`, `GET /api/series/{id}`, `PATCH /api/series/{id}/archive`,
+`DELETE /api/series/{id}` (deletes the series and all of its runs), `POST /api/series/backfill`
+and `GET /api/series/export/archive`. The archive export is a zip holding the full PDF and
+findings CSV for the latest completed run of every archived series, plus `manifest.csv`,
+`README.txt` and `generated-at.txt`.
+
+### History page
+One row per repository: latest score, verdict, run count, delta versus the previous run and the
+last run time. Expanding a row lists every run with its own score, delta and verdict. Search by
+repository, owner or branch, and five sort orders. Archiving is per series, with the archive in a
+collapsible section that carries the bundle download. Deleting works at both levels: a single run,
+or the whole repository.
+
+### Validation
+`myday-2.0.zip` was uploaded twice. Both runs landed on one series (`myday-2.0`, 2 runs) rather
+than two history rows. To prove the delta arithmetic rather than just the append, run 2 used a
+variant with 12 duplicated agent files: score moved 79 -> 55, verdict Watchlist -> Wasteful,
+delta -24.
+
+### Bug found and fixed during validation
+`_walk_repository` excluded any directory starting with `.git`, which silently swallowed
+`.github/`. That is where `copilot-instructions.md`, `agents/*.agent.md` and `prompts/*.prompt.md`
+live, so the 24 agent files in the user's own repository were invisible and it scored a misleading
+100 / Lean. Only the literal `.git` object store is dropped now. The same repository scans as
+82 files / 79 / Watchlist. `test_core.py` still passes 59/59.

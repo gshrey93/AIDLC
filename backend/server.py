@@ -13,17 +13,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel
 
+import series as series_mod
 from core import exports as export_mod
 from core import importer
 from core.config import INVENTORY_GROUPS, MAX_ARCHIVE_BYTES, MAX_FILES
 from core.report import build_payload, inventory_summary
 from db import (
     DEMO_USER_ID, category_scores, drafts as drafts_col, ensure_demo_user, ensure_indexes,
-    export_jobs, file_assets, issues as issues_col, next_scan_id, scans, serialize, utcnow,
+    export_jobs, file_assets, issues as issues_col, next_scan_id, repo_series, scans, serialize,
+    utcnow,
 )
 from scanner import (
-    KEEP_RECENT_SCANS, delete_scan, empty_kpis, enforce_retention, generate_single_draft,
-    initial_progress, run_scan,
+    KEEP_RECENT_SCANS, delete_scan, delete_series, empty_kpis, enforce_retention,
+    generate_single_draft, initial_progress, run_scan,
 )
 from seed import SEED_SPECS, seed_demo_data, seed_drafts
 from settings_store import (
@@ -80,6 +82,10 @@ class SettingsPatch(BaseModel):
 
 class DraftRequest(BaseModel):
     source_path: str
+
+
+class ArchivePatch(BaseModel):
+    archived: bool
 
 
 # ----------------------------------------------------------------- helpers
@@ -166,7 +172,8 @@ async def config_info():
         "github_url_hint": GITHUB_URL_HINT,
         "inventory_groups": INVENTORY_GROUPS,
         "retention": {
-            "content_days": 7, "metadata_days": 30, "keep_recent_scans": KEEP_RECENT_SCANS,
+            "content_days": 7, "metadata_days": 30, "keep_recent_scans": None,
+            "prune_old_scans": False,
         },
         "rights_ack_text": "I confirm I have the right to analyze this repository content",
         "seed": SEED_STATE,
@@ -312,6 +319,9 @@ async def create_scan(
         "workspace_dir": None,
     }
     await scans.insert_one(doc)
+    # Bind the run to its repository series straight away so it shows up in history while queued.
+    # For git sources the branch may still be unresolved; the scanner re-binds after the import.
+    await series_mod.attach_scan(scan_id, source_type, repo_owner, repo_name, spec.get("branch"))
     background.add_task(run_scan, scan_id, spec)
     log.info("queued scan %s (%s)", scan_id, source_type)
     return serialize(await scans.find_one({"id": scan_id}))
@@ -340,7 +350,11 @@ async def list_scans(limit: int = Query(100, ge=1, le=500), only_recent: bool = 
 @api.get("/scans/{scan_id}")
 async def get_scan(scan_id: str):
     scan = await _get_scan_or_404(scan_id)
-    return serialize(scan)
+    out = serialize(scan)
+    if scan.get("series_id"):
+        series = await repo_series.find_one({"id": scan["series_id"]})
+        out["series"] = serialize(series)
+    return out
 
 
 @api.get("/scans/{scan_id}/results")
@@ -373,6 +387,107 @@ async def remove_scan(scan_id: str):
     if not ok:
         raise HTTPException(status_code=404, detail=f"Scan {scan_id} was not found")
     return {"deleted": scan_id}
+
+
+# ------------------------------------------------------------ repo series
+@api.get("/series")
+async def list_repo_series(include_archived: bool = True):
+    result = await series_mod.list_series(include_archived=include_archived)
+    return {
+        "series": serialize(result["series"]),
+        "counts": result["counts"],
+        "seed": SEED_STATE,
+    }
+
+
+@api.post("/series/backfill")
+async def run_series_backfill():
+    """Idempotent migration that attaches any unassigned scan to a series."""
+    return await series_mod.backfill()
+
+
+@api.get("/series/export/archive")
+async def export_archived_bundle():
+    """Zip of the latest completed report for every archived series, plus a manifest CSV."""
+    series_docs = await series_mod.archived_series()
+    if not series_docs:
+        raise HTTPException(
+            status_code=404,
+            detail="There are no archived series yet. Archive a repository from the history page first.",
+        )
+    entries = []
+    for s in series_docs:
+        manifest = {
+            "series_id": s.get("id"),
+            "display_name": s.get("display_name"),
+            "source_type": s.get("source_type"),
+            "repo_owner": s.get("repo_owner") or "",
+            "repo_name": s.get("repo_name"),
+            "branch": s.get("branch") or "",
+            "run_count": s.get("run_count") or 0,
+            "completed_run_count": s.get("completed_run_count") or 0,
+            "first_run_at": serialize(s.get("first_run_at")) or "",
+            "latest_run_at": serialize(s.get("latest_run_at")) or "",
+            "latest_scan_id": s.get("latest_completed_scan_id") or s.get("latest_scan_id") or "",
+            "latest_score": s.get("latest_score") if s.get("latest_score") is not None else "",
+            "latest_verdict": s.get("latest_verdict") or "",
+            "previous_score": s.get("previous_score") if s.get("previous_score") is not None else "",
+            "score_delta": s.get("score_delta") if s.get("score_delta") is not None else "",
+            "best_score": s.get("best_score") if s.get("best_score") is not None else "",
+            "archived_at": serialize(s.get("archived_at")) or "",
+            "note": "",
+        }
+        payload = None
+        target = s.get("latest_completed_scan_id")
+        if target:
+            try:
+                payload = await _load_payload(target)
+                scan = payload["scan"]
+                manifest["estimated_monthly_credit_waste"] = scan.get("estimated_monthly_credit_waste") or 0
+                manifest["estimated_monthly_dollar_waste"] = scan.get("estimated_monthly_dollar_waste") or 0
+            except HTTPException:
+                payload = None
+                manifest["note"] = "The run referenced by this series no longer exists."
+        entries.append({"manifest": manifest, "payload": payload})
+
+    try:
+        data = await asyncio.to_thread(export_mod.archive_bundle_zip, entries)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("archive bundle failed")
+        raise HTTPException(
+            status_code=500,
+            detail=f"The archive bundle could not be built: {exc}. Download individual reports instead.",
+        ) from exc
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return _download(data, f"bloat-guardian-archive-{stamp}.zip", "application/zip")
+
+
+@api.get("/series/{series_id}")
+async def get_repo_series(series_id: str):
+    series = await repo_series.find_one({"id": series_id})
+    if not series:
+        raise HTTPException(status_code=404, detail=f"Series {series_id} was not found")
+    runs = await scans.find({"series_id": series_id}, series_mod.RUN_FIELDS).sort("created_at", -1).to_list(500)
+    out = serialize(series)
+    out["runs"] = serialize(runs)
+    return out
+
+
+@api.patch("/series/{series_id}/archive")
+async def archive_repo_series(series_id: str, body: ArchivePatch):
+    series = await series_mod.set_archived(series_id, body.archived)
+    if not series:
+        raise HTTPException(status_code=404, detail=f"Series {series_id} was not found")
+    return serialize(series)
+
+
+@api.delete("/series/{series_id}")
+async def remove_repo_series(series_id: str):
+    series = await repo_series.find_one({"id": series_id})
+    if not series:
+        raise HTTPException(status_code=404, detail=f"Series {series_id} was not found")
+    removed = await delete_series(series_id)
+    return {"deleted": series_id, "runs_deleted": removed}
 
 
 # ------------------------------------------------------------------ drafts
@@ -619,6 +734,11 @@ async def _run_seed(force: bool = False):
             log.info("seed drafts: %s", draft_result)
         except Exception:  # noqa: BLE001
             log.exception("seed drafts failed")
+        try:
+            # Seeded scans arrive without a series, so group them (archived by default).
+            log.info("series backfill after seed: %s", await series_mod.backfill())
+        except Exception:  # noqa: BLE001
+            log.exception("series backfill after seed failed")
         SEED_STATE.update({"status": "done"})
     except Exception as exc:  # noqa: BLE001
         log.exception("seeding failed")
@@ -638,6 +758,11 @@ async def not_found(_request, exc):
 async def on_startup():
     await ensure_indexes()
     await ensure_demo_user()
+    try:
+        migration = await series_mod.backfill()
+        log.info("series migration on startup: %s", migration)
+    except Exception:  # noqa: BLE001
+        log.exception("series migration failed")
     existing = await scans.count_documents({"is_seed": True})
     if existing < len(SEED_SPECS):
         asyncio.create_task(_run_seed(False))

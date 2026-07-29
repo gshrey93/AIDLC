@@ -20,6 +20,7 @@ client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
 
 scans = db.scans
+repo_series = db.repo_series
 file_assets = db.file_assets
 issues = db.issues
 category_scores = db.category_scores
@@ -53,6 +54,10 @@ def serialize(doc: Any) -> Any:
 async def ensure_indexes() -> None:
     await scans.create_index("id", unique=True)
     await scans.create_index([("created_at", -1)])
+    await scans.create_index("series_id")
+    await repo_series.create_index("id", unique=True)
+    await repo_series.create_index("key", unique=True)
+    await repo_series.create_index("archived")
     await file_assets.create_index("scan_id")
     await file_assets.create_index([("scan_id", 1), ("estimated_tokens", -1)])
     await issues.create_index("scan_id")

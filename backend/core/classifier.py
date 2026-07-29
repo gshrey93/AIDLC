@@ -221,7 +221,9 @@ def _walk_repository(root_dir: str) -> list:
     """Return [(relative_path, absolute_path)] for every analysable file on disk."""
     found: list = []
     for dirpath, dirnames, filenames in os.walk(root_dir):
-        dirnames[:] = [d for d in dirnames if d not in IGNORED_DIR_PARTS and not d.startswith(".git")]
+        # Only the literal ".git" object store is dropped. ".github" must stay: it holds
+        # copilot-instructions.md, agents/*.agent.md and prompts/*.prompt.md.
+        dirnames[:] = [d for d in dirnames if d not in IGNORED_DIR_PARTS]
         for fn in filenames:
             full = os.path.join(dirpath, fn)
             rel = os.path.relpath(full, root_dir).replace("\\", "/")

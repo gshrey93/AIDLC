@@ -10,7 +10,7 @@ import { apiError, downloadExport, endpoints } from "@/lib/api";
 import { num } from "@/lib/format";
 
 export const DraftPreview = ({ scanId, repoName, drafts, candidates, onDraftCreated }) => {
-  const [active, setActive] = useState(drafts?.[0]?.id || "");
+  const [active, setActive] = useState(drafts?.[0]?.source_path || "");
   const [generating, setGenerating] = useState("");
   const list = drafts || [];
   const done = new Set(list.map((d) => d.source_path));
@@ -31,7 +31,7 @@ export const DraftPreview = ({ scanId, repoName, drafts, candidates, onDraftCrea
       const res = await endpoints.createDraft(scanId, sourcePath);
       toast.success(`${res.data.target_filename} generated`);
       if (onDraftCreated) await onDraftCreated();
-      setActive(res.data.id);
+      setActive(res.data.source_path);
     } catch (err) {
       toast.error(apiError(err, "Draft generation failed"));
     } finally {
@@ -80,19 +80,25 @@ export const DraftPreview = ({ scanId, repoName, drafts, candidates, onDraftCrea
         </div>
       ) : (
         <div className="p-4">
-          <Tabs value={active || list[0].id} onValueChange={setActive}>
+          {/* Identity comes from source_path: it is unique per scan (one draft per file). */}
+          <Tabs value={active || list[0].source_path} onValueChange={setActive}>
             <TabsList
               className="flex h-auto w-full flex-wrap justify-start gap-1 bg-secondary"
               data-testid="draft-tabs"
             >
               {list.map((d) => (
-                <TabsTrigger key={d.id} value={d.id} className="text-xs" data-testid={`draft-tab-${d.id}`}>
+                <TabsTrigger
+                  key={d.source_path}
+                  value={d.source_path}
+                  className="text-xs"
+                  data-testid={`draft-tab-${d.id}`}
+                >
                   {d.target_filename}
                 </TabsTrigger>
               ))}
             </TabsList>
             {list.map((d) => (
-              <TabsContent key={d.id} value={d.id} className="mt-4">
+              <TabsContent key={d.source_path} value={d.source_path} className="mt-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div className="min-w-0">
                     <p className="font-heading text-sm font-bold">{d.target_filename}</p>

@@ -12,7 +12,10 @@ from core import importer
 from core.analyzer import analyze
 from core.classifier import build_inventory
 from core.drafts import MAX_DRAFTS, generate_draft, select_draft_targets
-from db import category_scores, drafts as drafts_col, file_assets, issues as issues_col, repo_series, scans, utcnow
+from db import (
+    category_scores, drafts as drafts_col, file_assets, issues as issues_col, next_draft_id,
+    repo_series, scans, utcnow,
+)
 from settings_store import get_settings, resolve_llm_credentials
 
 log = logging.getLogger("bloatguardian.scanner")
@@ -300,7 +303,7 @@ async def run_scan(scan_id: str, spec: dict):
                             timeout=300,
                         )
                         d.update({
-                            "id": f"DRF-{scan_id}-{idx + 1:03d}",
+                            "id": await next_draft_id(scan_id),
                             "scan_id": scan_id,
                             "created_at": utcnow(),
                             "key_source": key_source,
@@ -376,13 +379,15 @@ async def generate_single_draft(scan_id: str, source_path: str) -> dict:
                        api_key, provider, model, session_id=f"{scan_id}-ondemand-{existing_count}"),
         timeout=300,
     )
+    # Replace any earlier draft for this file first, then take the lowest free id so a gap left by
+    # a failed auto-draft can never produce a duplicate id.
+    await drafts_col.delete_many({"scan_id": scan_id, "source_path": source_path})
     d.update({
-        "id": f"DRF-{scan_id}-{existing_count + 1:03d}",
+        "id": await next_draft_id(scan_id),
         "scan_id": scan_id,
         "created_at": utcnow(),
         "key_source": key_source,
     })
-    await drafts_col.delete_many({"scan_id": scan_id, "source_path": source_path})
     await drafts_col.insert_one(dict(d))
     total = await drafts_col.count_documents({"scan_id": scan_id})
     await scans.update_one({"id": scan_id}, {"$set": {

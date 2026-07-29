@@ -22,7 +22,7 @@ export const AppShell = ({ children }) => {
             >
               <Gauge className="h-5 w-5" />
             </span>
-            <span className="font-heading text-lg font-bold tracking-tight text-white">
+            <span className="hidden font-heading text-lg font-bold tracking-tight text-white sm:inline">
               Bloat Guardian
             </span>
           </Link>
@@ -53,7 +53,7 @@ export const AppShell = ({ children }) => {
               data-testid="nav-new-scan"
             >
               <Link to="/scan/new">
-                <Plus className="mr-1.5 h-4 w-4" /> New scan
+                <Plus className="h-4 w-4 sm:mr-1.5" /> <span className="hidden sm:inline">New scan</span>
               </Link>
             </Button>
           </nav>

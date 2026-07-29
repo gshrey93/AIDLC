@@ -207,8 +207,8 @@ export const IssuesTable = ({ issues }) => {
         </div>
       </div>
 
-      <div className="overflow-x-auto">
-        <Table className="drl-table" data-testid="issues-table">
+      <div className="overflow-x-auto scrollbar-thin">
+        <Table className="drl-table min-w-[1000px]" data-testid="issues-table">
           <TableHeader>
             <TableRow>
               <TableHead className="w-[110px]">{sortButton("id", "Issue")}</TableHead>

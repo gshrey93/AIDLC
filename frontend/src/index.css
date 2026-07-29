@@ -234,6 +234,12 @@
         @apply border-border;
     }
 
+    /* Grid items default to min-width:auto which lets a wide table stretch the
+       whole grid track. Zeroing it keeps inner scroll containers in charge. */
+    .grid > * {
+        min-width: 0;
+    }
+
     body {
         margin: 0;
         font-family: var(--font-family);

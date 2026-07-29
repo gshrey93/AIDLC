@@ -1,7 +1,7 @@
 import { Card } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { MetaChip } from "@/components/VerdictBadge";
-import { compact, money, num } from "@/lib/format";
+import { CATEGORY_LABELS, compact, money, num } from "@/lib/format";
 
 export const TopDrivers = ({ drivers }) => (
   <Card
@@ -52,8 +52,8 @@ export const RecommendedActions = ({ actions }) => (
         Ranked by impact first, then by how little effort it takes. Start at the top.
       </p>
     </div>
-    <div className="overflow-x-auto">
-      <Table className="drl-table">
+    <div className="overflow-x-auto scrollbar-thin">
+      <Table className="drl-table min-w-[860px]">
         <TableHeader>
           <TableRow>
             <TableHead className="w-[40px] text-xs">#</TableHead>
@@ -111,17 +111,16 @@ export const ScoreLedger = ({ ledger }) => (
         monthly agent context budget each category wastes.
       </p>
     </div>
-    <div className="overflow-x-auto">
-      <Table className="drl-table">
+    <div className="overflow-x-auto scrollbar-thin">
+      <Table className="drl-table min-w-[680px]">
         <TableHeader>
           <TableRow>
             <TableHead className="text-xs">Rule</TableHead>
             <TableHead className="w-[70px] text-xs">Tier</TableHead>
-            <TableHead className="w-[140px] text-xs">Category</TableHead>
+            <TableHead className="w-[150px] text-xs">Category</TableHead>
             <TableHead className="w-[70px] text-right text-xs">Hits</TableHead>
-            <TableHead className="w-[80px] text-right text-xs">Each</TableHead>
             <TableHead className="w-[60px] text-right text-xs">Cap</TableHead>
-            <TableHead className="w-[80px] text-right text-xs">Applied</TableHead>
+            <TableHead className="w-[90px] text-right text-xs">Applied</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -129,6 +128,11 @@ export const ScoreLedger = ({ ledger }) => (
             <TableRow key={i} data-testid="score-ledger-row">
               <TableCell className="max-w-[380px] text-xs">
                 <span className="block font-medium leading-5">{r.rule}</span>
+                {r.points_each ? (
+                  <span className="mt-0.5 block text-[11px] text-muted-foreground">
+                    -{r.points_each} points per hit
+                  </span>
+                ) : null}
                 {r.detail ? (
                   <span className="mt-1 block break-words font-mono text-[11px] leading-4 text-muted-foreground">
                     {r.detail}
@@ -136,13 +140,10 @@ export const ScoreLedger = ({ ledger }) => (
                 ) : null}
               </TableCell>
               <TableCell className="text-xs">{r.tier === "scaling" ? "Tier 2" : "Tier 1"}</TableCell>
-              <TableCell className="text-xs">{r.category}</TableCell>
+              <TableCell className="text-xs">{CATEGORY_LABELS[r.category] || r.category}</TableCell>
               <TableCell className="num text-right text-xs">{num(r.hits)}</TableCell>
-              <TableCell className="num text-right text-xs">
-                {r.points_each ? `-${r.points_each}` : "scaled"}
-              </TableCell>
               <TableCell className="num text-right text-xs">{num(r.cap)}</TableCell>
-              <TableCell className="num text-right text-xs font-semibold">-{num(r.applied)}</TableCell>
+              <TableCell className="num text-right text-xs font-bold">-{num(r.applied)}</TableCell>
             </TableRow>
           ))}
         </TableBody>

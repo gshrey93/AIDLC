@@ -259,12 +259,11 @@ export default function ScanResults() {
         </div>
       </section>
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        <TopDrivers drivers={data.top_drivers} />
-        <ScoreLedger ledger={data.penalty_ledger} />
-      </div>
+      <TopDrivers drivers={data.top_drivers} />
 
       <IssuesTable issues={data.issues} />
+
+      <ScoreLedger ledger={data.penalty_ledger} />
 
       <RecommendedActions actions={data.recommended_actions} />
 

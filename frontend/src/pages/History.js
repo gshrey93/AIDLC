@@ -158,8 +158,8 @@ export default function History() {
         </Card>
 
         <Card className="rounded-xl border border-border bg-card shadow-[var(--shadow-md)]">
-          <div className="overflow-x-auto">
-            <Table className="drl-table" data-testid="history-table">
+          <div className="overflow-x-auto scrollbar-thin">
+            <Table className="drl-table min-w-[1080px]" data-testid="history-table">
               <TableHeader>
                 <TableRow>
                   <TableHead className="text-xs">Scan date</TableHead>

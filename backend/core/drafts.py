@@ -14,6 +14,8 @@ from .config import CATEGORY_AGENT, CATEGORY_CONTEXT, CATEGORY_ORCHESTRATION, CA
 
 MAX_DRAFTS = 25
 MAX_SOURCE_CHARS = 30000
+MIN_SOURCE_TOKENS = 150
+MIN_DRAFT_CHARS = 220
 
 CANONICAL_NAMES = ["instruction.md", "instructions.md", "orchestrator.md", "context.md", "memory.md"]
 
@@ -66,6 +68,7 @@ def select_draft_targets(files: list, analysis: dict, limit: int = MAX_DRAFTS) -
     eligible = [
         f for f in files
         if f.parse_status == "Scanned" and f.content
+        and f.estimated_tokens >= MIN_SOURCE_TOKENS
         and f.category in (CATEGORY_AGENT, CATEGORY_ORCHESTRATION, CATEGORY_CONTEXT, CATEGORY_SKILL)
     ]
     dup_paths = {p for c in analysis.get("clusters", []) for p in c.get("files", [])}
@@ -175,15 +178,40 @@ async def generate_draft(
     else:
         chat = chat.with_params(max_tokens=8000)
 
-    buf = []
-    async for ev in chat.stream_message(UserMessage(text=build_user_prompt(target, repo_name))):
-        if isinstance(ev, TextDelta):
-            buf.append(ev.content)
-        elif isinstance(ev, StreamDone):
-            break
-    draft = _clean_output("".join(buf))
-    if not draft:
-        raise RuntimeError("The model returned an empty draft")
+    async def run(extra: str = "") -> str:
+        buf = []
+        prompt = build_user_prompt(target, repo_name)
+        if extra:
+            prompt = f"{prompt}\n\n{extra}"
+        async for ev in chat.stream_message(UserMessage(text=prompt)):
+            if isinstance(ev, TextDelta):
+                buf.append(ev.content)
+            elif isinstance(ev, StreamDone):
+                break
+        return _clean_output("".join(buf))
+
+    draft = await run()
+    source_tokens = int(target.get("source_tokens") or 0)
+    source_chars = len(target.get("content") or "")
+    min_expected = max(MIN_DRAFT_CHARS, int(min(source_chars, MAX_SOURCE_CHARS) * 0.18))
+    if len(draft) < min_expected:
+        draft = await run(
+            "Your previous answer was far too short to be a usable replacement file. Produce the FULL "
+            "rewritten markdown document again. Keep every real rule, constraint, tool name, file path "
+            f"and acceptance criterion from the original. The rewrite must be at least {min_expected} "
+            "characters long and should land around 40 to 65 percent of the original length. "
+            "Output only the markdown body."
+        )
+    quality_warning = None
+    if len(draft) < 80:
+        raise RuntimeError(
+            "The model returned a draft that was too short to be usable. Try again, or pick a larger file."
+        )
+    if len(draft) < min_expected:
+        quality_warning = (
+            "This rewrite came back much shorter than expected. Read it side by side with the original "
+            "before you replace anything, in case a rule was dropped."
+        )
 
     new_tokens = estimate_tokens(len(draft))
     saved = max(0, target["source_tokens"] - new_tokens)
@@ -199,4 +227,5 @@ async def generate_draft(
         "tokens_saved_per_load": saved,
         "reduction_pct": round((saved / target["source_tokens"] * 100) if target["source_tokens"] else 0.0, 1),
         "model": f"{provider}/{model}",
+        "quality_warning": quality_warning,
     }

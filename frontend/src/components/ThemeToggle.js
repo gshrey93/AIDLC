@@ -41,7 +41,7 @@ export const ThemeToggle = () => {
 
   return (
     <div
-      className="hidden items-center gap-0.5 rounded-xl p-0.5 sm:flex"
+      className="flex items-center gap-0.5 rounded-xl p-0.5"
       style={{ background: "rgba(255,255,255,0.14)" }}
       role="group"
       aria-label="Colour theme"

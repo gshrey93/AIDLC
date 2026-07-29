@@ -144,6 +144,12 @@ export const DraftPreview = ({ scanId, repoName, drafts, candidates, onDraftCrea
                 >
                   {d.draft_content}
                 </pre>
+
+                {d.quality_warning ? (
+                  <div className="alert alert-warning mt-3" data-testid={`draft-quality-warning-${d.id}`}>
+                    <p className="text-xs leading-5">{d.quality_warning}</p>
+                  </div>
+                ) : null}
               </TabsContent>
             ))}
           </Tabs>

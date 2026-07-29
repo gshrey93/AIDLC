@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -294,7 +295,16 @@ async def create_scan(
             with open(path, "wb") as fh:
                 fh.write(data)
             saved.append((os.path.basename(f.filename), path))
-        repo_name = "markdown-upload"
+        # Markdown uploads have no repository name, so the series identity comes from the uploaded
+        # file set: re-uploading the same files appends a run, a different set starts its own series.
+        stems = [os.path.splitext(name)[0] for name, _ in saved]
+        if len(saved) == 1:
+            repo_name = stems[0] or "markdown-upload"
+        else:
+            digest = hashlib.sha1(
+                "|".join(sorted(name for name, _ in saved)).encode("utf-8")
+            ).hexdigest()[:6]
+            repo_name = f"{sorted(stems)[0]} +{len(saved) - 1} more ({digest})"
         spec["md_files"] = saved
         spec["repo_name"] = repo_name
 

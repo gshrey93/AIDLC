@@ -1,4 +1,5 @@
 """Comprehensive backend API tests for Bloat Guardian."""
+import csv
 import io
 import json
 import os
@@ -414,8 +415,9 @@ class BackendTester:
         
         csv_resp = requests.get(f"{API_BASE}/scans/{self.completed_scan_id}/export/csv", timeout=30)
         csv_text = csv_resp.text
-        csv_lines = [line for line in csv_text.split('\n') if line.strip()]
-        data_rows = len(csv_lines) - 1  # Subtract header
+        # Parse properly: evidence and description fields legitimately contain quoted newlines,
+        # so counting raw lines over-reports the number of records.
+        data_rows = len(list(csv.DictReader(io.StringIO(csv_text))))
         
         self.assert_equal(data_rows, issue_count, 
                          f"CSV row count mismatch: expected {issue_count}, got {data_rows}")

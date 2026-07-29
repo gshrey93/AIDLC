@@ -124,3 +124,17 @@ delta -24.
 live, so the 24 agent files in the user's own repository were invisible and it scored a misleading
 100 / Lean. Only the literal `.git` object store is dropped now. The same repository scans as
 82 files / 79 / Watchlist. `test_core.py` still passes 59/59.
+
+### Two further fixes from validation
+1. Markdown uploads all carried the fixed name `markdown-upload`, so every unrelated `.md` batch
+   collapsed into one series. The series name now comes from the uploaded file set (single file
+   name, or `first +N more (hash)`), so re-uploading the same set appends a run while a different
+   set starts its own series. Verified both ways.
+2. `backend_test.py` counted raw CSV lines, which over-reports records because evidence fields
+   contain quoted newlines (41 issues read as 103 rows). It now uses `csv.DictReader`.
+
+### Known non-code issue
+`test_core.py` is at 56/59: the three failures are all LLM draft checks and the provider reports
+"Budget has been exceeded! Current cost 42.48, max budget 41.0". The Universal Key needs a top-up
+(Profile > Universal Key > Add Balance), or a personal Anthropic/Gemini key in Settings. The app
+already surfaces this as an HTTP 402 with a plain-language message; nothing else is affected.

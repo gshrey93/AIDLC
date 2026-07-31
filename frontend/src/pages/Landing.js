@@ -8,6 +8,7 @@ import {
   Github,
   ListChecks,
   ShieldCheck,
+  Sparkles,
   Upload,
 } from "lucide-react";
 import { Card } from "@/components/ui/card";
@@ -47,16 +48,19 @@ export default function Landing() {
   return (
     <div className="space-y-10">
       <section className="bg-hero -mx-4 rounded-none px-4 py-10 sm:-mx-6 sm:px-6 sm:py-14 lg:-mx-8 lg:rounded-3xl lg:px-10">
-        <p className="inline-flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1 text-xs font-medium text-muted-foreground">
-          <Gauge className="h-3.5 w-3.5 text-primary" /> Agentic repository efficiency audit
-        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="inline-flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1 text-xs font-medium text-muted-foreground">
+            <Gauge className="h-3.5 w-3.5 text-primary" /> Agentic repository efficiency audit
+          </p>
+          <p className="inline-flex items-center gap-2 rounded-full border border-primary/30 bg-primary/10 px-3 py-1 text-xs font-semibold text-primary">
+            <Sparkles className="h-3.5 w-3.5" /> Built by AI for AI Agents
+          </p>
+        </div>
         <h1 className="mt-5 max-w-3xl text-h1 font-heading tracking-tight">
           Find out how much your agent instructions are quietly costing you.
         </h1>
         <p className="mt-4 max-w-2xl text-base leading-7 text-muted-foreground md:text-lg">
-          Bloat Guardian reads the markdown and config files that drive your coding agents, finds the
-          duplicated instructions, oversized context files and extra review loops, and tells you in plain
-          language what to delete and what it saves.
+          Bloat Guardian is an AI tool built by AI to analyze the markdown and config files driving your coding agents — finding duplicated instructions, oversized context files, and extra review loops, and telling you in plain language what to delete and what it saves.
         </p>
         <div className="mt-7 flex flex-wrap gap-3">
           <Button asChild size="lg" className="rounded-xl" data-testid="landing-scan-github-button">

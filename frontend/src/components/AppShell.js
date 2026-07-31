@@ -63,7 +63,7 @@ export const AppShell = ({ children }) => {
       <footer className="border-t border-border bg-card">
         <div className="mx-auto flex w-full max-w-[1260px] flex-col gap-1 px-4 py-6 text-xs text-muted-foreground sm:px-6">
           <p>
-            Bloat Guardian analyses agentic repositories for duplicated instructions, oversized context
+            Bloat Guardian is an AI tool built by AI to analyse agentic repositories for duplicated instructions, oversized context
             files and review overhead. It never edits your repository.
           </p>
           <p>Imported repository content is kept for 7 days. Scan reports are kept for 30 days.</p>

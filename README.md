@@ -1,7 +1,7 @@
 # Bloat Guardian
 
-Analyse an agentic coding repository for waste — duplicated agent instructions, oversized context
-files, agent sprawl, review-loop overhead and architecture mismatch — and return a quantified,
+An AI tool built by AI to analyse agentic coding repositories for waste — duplicated agent instructions, oversized context
+files, agent sprawl, review-loop overhead and architecture mismatch — returning a quantified,
 plain-language efficiency verdict with AI-rewritten replacement files.
 
 Single user. No authentication. Nothing is ever written back to your repository.

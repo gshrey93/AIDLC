@@ -53,7 +53,7 @@ export default function Landing() {
             <Gauge className="h-3.5 w-3.5 text-primary" /> Agentic repository efficiency audit
           </p>
           <p className="inline-flex items-center gap-2 rounded-full border border-primary/30 bg-primary/10 px-3 py-1 text-xs font-semibold text-primary">
-            <Sparkles className="h-3.5 w-3.5" /> Built by AI for AI Agents
+            <Sparkles className="h-3.5 w-3.5" /> Built with Emergent
           </p>
         </div>
         <h1 className="mt-5 max-w-3xl text-h1 font-heading tracking-tight">

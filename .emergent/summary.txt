@@ -1,0 +1,138 @@
+<analysis>**original_problem_statement**: 
+Bloat Guardian is a web app for Product Owners and TPMs to analyze agentic coding repositories (GitHub, Bitbucket, Zip, .md) for token bloat, redundant agents, and oversized context. The app parses repos (up to 1500 files/250MB), runs an adversary scan to detect inefficiencies, generates a 0-100 score with a verdict (Lean, Watchlist, Wasteful, Critical), and uses an LLM to draft optimized replacement files for agent/context configurations. It includes PDF, CSV, and ZIP exports. Single-user app. 
+
+**User's preferred language**: 
+INSTRUCT the next agent to respond in **English** only.
+
+**what currently exists?**: 
+A fully functional MVP of Bloat Guardian is deployed and verified. The backend (FastAPI + MongoDB) handles repository ingestion, deterministic heuristic scoring, and Claude Opus 4.7 integration for drafting replacement files. The frontend (React + shadcn/ui) implements the DRL Brand Design System (dark/light mode, specific typography) and covers all required surfaces (Landing, Scan Progress, Results Dashboard, History, Settings). Exports (Full PDF, Redacted PDF, CSV, Draft ZIP, VS Code Handoff) are fully operational. The core has passed 59/59 isolated tests, and the app has passed 6 iterations of end-to-end agent testing.
+
+**Last working item**: 
+    - Last item agent was working: The previous agent was preparing to implement a major data model and UI overhaul for the History and Scan tracking logic requested by the user, but safely halted execution because it ran out of context limit before starting a complex DB migration.
+    - Status: NOT STARTED
+    - Agent Testing Done: N
+    - Which testing method agent to use? testing agent after the DB migration and UI changes are complete.
+    - User Testing Done: N
+
+**All Pending/In progress Issue list**: 
+None. All previously identified bugs (e.g.,  multi-file upload 422 error, auto-navigation latching) were fixed and verified by the testing agent.
+
+**In progress Task List**: 
+None currently in progress. The agent stopped cleanly before starting the next major phase.
+
+**Upcoming and Future Tasks**:
+  Upcoming Tasks:
+  - Task 1: **Data Model Migration (RepoSeries)** (P0)
+    - Implement  entity keyed on .  and  are separate series.
+    - Scans now become runs attached to a series.
+    - Run a backfill migration for the existing 22 scans. Ensure existing  and export links remain working.
+    - Remove the old keep only 10, prune the rest retention rule.
+  - Task 2: **History UI Overhaul & Archive Feature** (P0)
+    - History page must show one row per series (latest score, verdict, run count, delta vs previous run), expandable to show individual runs.
+    - Add per-series archive/un-archive functionality. Archived series move to a collapsible Archive section.
+    - The 20 demo series must start as archived.
+    - Implement Archive Export: Download a zip bundle of archived reports plus a manifest CSV.
+  - Task 3: **Validation via Zip Upload** (P0)
+    - Validate the new logic by uploading and scanning the user-provided artifact ( - URL: ) **twice**.
+    - Prove that the second run appends to the same series with a score delta instead of creating a duplicate row.
+  - Task 4: **Testing and Health Check** (P0)
+    - Call  to verify all new history and archive flows.
+    - Run a deployment health check.
+
+  Future Tasks:
+  - Task 5: **Advanced Analysis Features** (P1)
+    - Scan-to-scan comparison to prove savings after applying drafts.
+    - Inline diffs for duplicate clusters to show exactly why files are similar.
+    - Batch draft generation for all 25 eligible files.
+
+**Completed work in this session**:
+- Implemented core analyzer and heuristic scoring engine (, , ).
+- Implemented LLM draft generation with Claude 4.7 ().
+- Implemented file exports (PDF, CSV, ZIP) ().
+- Completed Phase 2 Backend & Frontend E2E implementation.
+- Applied DRL v2.1 Design System across the UI.
+- Seeded database with 20 demo scans.
+- Fixed  file array upload bug.
+- Fixed UI auto-navigation on scan completion.
+- Added graceful handling for LLM Budget limits (HTTP 402).
+- Generated complete .
+
+**Earlier issues found/mentioned but not fixed**:
+None. All found issues were addressed.
+
+**Known issue recurrence from previous fork**:
+- Issue recurrence in previous fork: N/A
+- Recurrence count: 0
+- Status: N/A
+
+**Code Architecture**:
+
+
+**Key Technical Concepts**:
+- Frontend: React, Tailwind CSS, shadcn/ui, Recharts.
+- Backend: FastAPI, Motor (Async MongoDB), ReportLab (PDF generation).
+- Logic: AST/Heuristic file parsing, token estimation ().
+- AI: Litellm via Emergent integrations for Claude-opus-4.7.
+
+**key DB schema**:
+- : {id, status, source_type, repo_name, verdict, overall_score...}
+- : {scan_id, path, category, parse_status...}
+- : {scan_id, severity, category, description...}
+- : {scan_id, category, score...}
+- : {scan_id, target_filename, draft_content...}
+*(Note: Requires updating to include  as per Upcoming Tasks)*
+
+**changes in tech stack**:
+- Adopted the DRL v2.1 Design System (provided via user artifact).
+
+**All files of reference**:
+-  (Updated comprehensively)
+-  (Contains the heavy lifting for scoring logic)
+-  (Target for upcoming UI rework)
+
+**Areas that need refactoring**:
+- : The  function is over 500 lines with high cyclomatic complexity. The previous agent extracted some helper functions but intentionally deferred a full refactor to avoid breaking the delicate heuristic math. It should be refactored into smaller, testable modules in the future.
+
+**key api endpoints**:
+- , , 
+- 
+- 
+- 
+
+**Critical Info for New Agent**:
+- **DO NOT START ANY OTHER TASKS UNTIL THE DB MIGRATION IS DONE.** You are picking up exactly where the previous agent stopped. The exact queued steps are explicitly listed in **Upcoming Tasks Task 1 & 2**. 
+- The user has provided a zip file for testing the new history/run appending logic: . You must scan this *twice* to prove it creates 2 runs under 1 series.
+- There are currently 22 scans in the DB (20 seeded, 2 real). Your migration script must handle these gracefully.
+
+**documents and test reports created in this job**:
+- 
+- 
+- 
+-  to 
+
+**Last 10 User Messages and any pending HUMAN messages**:
+1. User provided feedback on the History/Archive requirements (1a, 1c, 2a, branch-aware).
+2. User uploaded  for testing and asked to proceed.
+3. User said proceed (Agent warned about context window).
+4. User said proceed again. (Agent officially stopped to wait for a fresh fork).
+*Pending Human Messages*: None. Proceed directly with the Data Model Migration.
+
+**Project Health Check**:
+- Broken: None
+- Mocked: None (App is using real integrations).
+
+**3rd Party Integrations**:
+- Emergent Universal LLM Key (Used for Anthropic Claude-opus-4.7 draft generation).
+- (Optional) User can provide their own Anthropic/Gemini keys via the Settings page.
+
+**Testing status**:
+- Testing agent used after significant changes: YES (6 iterations done)
+- Troubleshoot agent used after agent stuck in loop: NO
+- Test files created: 
+- Known regressions: None.
+
+**Credentials to test flow**:
+None required. App uses the Universal LLM key.
+
+**What agent forgot to execute**:
+The previous agent did not forget anything; it deliberately stopped executing to preserve code integrity because it ran out of context tokens just as the user requested a massive database schema change (). You must execute this change immediately.</analysis>

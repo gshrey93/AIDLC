@@ -1,5 +1,4 @@
-
-Action: file_editor create /app/README.md --file-text "# Bloat Guardian
+# Bloat Guardian
 
 Analyse an agentic coding repository for waste — duplicated agent instructions, oversized context
 files, agent sprawl, review-loop overhead and architecture mismatch — and return a quantified,
@@ -65,7 +64,7 @@ visual direction.
 │   │   ├── classifier.py      walk, classify, token estimate, inventory
 │   │   ├── similarity.py      shingles, bottom-k sketch, LSH, union-find
 │   │   ├── analyzer.py        detections, penalties, scores, issues, savings
-│   │   ├── drafts.py          claude-opus-4-7 \"-optimised\" rewrites
+│   │   ├── drafts.py          claude-opus-4-7 "-optimised" rewrites
 │   │   ├── exports.py         PDF / CSV / zip / printable HTML
 │   │   └── report.py          canonical report payload
 │   ├── requirements.txt
@@ -109,7 +108,7 @@ Useful endpoints:
 curl $URL/api/health
 curl $URL/api/scans
 curl $URL/api/scans/{id}/results
-curl -X POST \"$URL/api/admin/seed?force=true\"   # regenerate demo data
+curl -X POST "$URL/api/admin/seed?force=true"   # regenerate demo data
 ```
 
 ---
@@ -184,14 +183,23 @@ credits* (100 = $1.00). Every value is editable; **Refresh rates** returns a mod
 a live billing feed.
 
 **Limits and retention.** 1,500 files, 250 MB compressed, 5 MB per-file parse cap; imported content
-kept 7 days, reports 30 days, your 10 most recent real scans retained (seeded demo scans exempt).
+kept 7 days, report metadata for your own scans kept 30 days. There is no scan-count cap: every run
+is kept under its repository series until you delete it.
+
+**Repository series and runs.** A *series* is one repository on one branch, keyed on
+`source_type + owner + repo_name + branch`, so `main` and `develop` are tracked separately. Zip
+uploads key on the uploaded file name and markdown uploads on the uploaded file set, so scanning the
+same thing again *appends a run* to the same series instead of creating a second history row. Each
+run records its `run_number` and its `score_delta` against the previous completed run. History shows
+one row per series — latest score, verdict, run count and delta — that expands to the full run list.
+Series can be archived per repository; archived series collapse into an Archive section that offers a
+zip bundle of the latest report and findings CSV for each one plus a `manifest.csv`. Deleting works
+at either level: a single run, or a whole repository with all its runs.
 
 **Spec reconciliations.** The seed counts in the spec were internally inconsistent (source types
 summed to 24 and verdicts to 22 against a 20-scan total); resolved as 12 GitHub / 4 zip / 4 markdown
-= 20, and 17 completed + 1 `InsufficientData` + 1 `ImportFailed` + 1 `ParseFailed`. History shows all
-retained scans with a \"last 10 only\" toggle so the retention rule and the 20-scan demo view coexist.
+= 20, and 17 completed + 1 `InsufficientData` + 1 `ImportFailed` + 1 `ParseFailed`. The 20 seeded
+demo repositories start in the Archive so your own work leads the history page.
 
 **Out of scope** (per the spec): multi-user, RBAC, PR write-back, in-place editing, private-repo auth,
 SSO, payments, fine-tuning, and security/secret/licence scanning.
-"
-Observation: Overwrite successful: /app/README.md

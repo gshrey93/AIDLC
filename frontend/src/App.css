@@ -1,0 +1,18 @@
+.scrollbar-thin::-webkit-scrollbar {
+    height: 8px;
+    width: 8px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb {
+    background: hsl(38 24% 80%);
+    border-radius: 999px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.markdown-preview {
+    white-space: pre-wrap;
+    word-break: break-word;
+}

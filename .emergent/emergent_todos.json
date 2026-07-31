@@ -1,0 +1,42 @@
+[
+  {
+    "content": "Verify the 18 `is` findings - ALL confirmed false positives (`is None`/`is not None`), correctly left unchanged",
+    "status": "completed"
+  },
+  {
+    "content": "Fix the two undefined-variable code paths in server.py",
+    "status": "completed"
+  },
+  {
+    "content": "Build golden-snapshot harness (mutation-tested, proven to catch changes)",
+    "status": "completed"
+  },
+  {
+    "content": "Refactor core/classifier.py inventory_from_entries: CC 15 -> 4",
+    "status": "completed"
+  },
+  {
+    "content": "Refactor core/drafts.py select_draft_targets CC 25 -> 4, generate_draft CC 14 -> 4",
+    "status": "completed"
+  },
+  {
+    "content": "Refactor core/exports.py _common_sections CC 57 -> 2, efficiency_summary_md CC 18 -> 4",
+    "status": "completed"
+  },
+  {
+    "content": "Refactor core/analyzer.py analyze(): CC 88 -> 10, 521 lines -> ~45",
+    "status": "completed"
+  },
+  {
+    "content": "Investigate user's 403 report: could not reproduce; found + fixed misleading 403 classification in importer",
+    "status": "completed"
+  },
+  {
+    "content": "Verify: golden snapshot IDENTICAL, test_core.py 59/59, esbuild clean",
+    "status": "completed"
+  },
+  {
+    "content": "testing_agent iteration 9: 100% pass, no critical bugs, refactor confirmed behaviour-preserving",
+    "status": "completed"
+  }
+]

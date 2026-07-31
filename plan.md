@@ -1,0 +1,353 @@
+# Bloat Guardian — Implementation Plan & Status
+
+## Phase 1 — Core POC in isolation — COMPLETE (59/59 checks passed)
+
+`/app/test_core.py`, run with `cd /app && python test_core.py`. Real network, real LLM, no mocks.
+
+Proven:
+- Real GitHub import of `github/awesome-copilot` (71 MB archive, 2215 files, 1445 parsed, 3.7M tokens)
+- Real GitHub error paths: `GitHubRepoUnavailable`, `BranchNotFound`, `RepoTooLarge`
+  (`torvalds/linux` = 6149 MB), non-GitHub URL rejection
+- Real Bitbucket import of `tildeslash/monit` + `BitbucketRepoUnavailable`
+- Zip import, `ZipCorrupted`, `ZipTooLarge`; markdown upload + `InsufficientData` with zeroed savings
+- Analyzer: `ceil(chars/4)` verified against the raw file, all seven penalty rules verified against
+  their caps, five integer category scores, weighted 25/25/20/20/10 overall verified arithmetically,
+  verdict bands, `PartialScan` at 26.6% skipped, deterministic across repeated runs
+- Detections: duplicate clusters, repeated instruction blocks, oversized context files, agent
+  sprawl, 10 review stages, microservice mismatch, overlapping agent groups
+- Savings: derived $4.00/1M input and $20.00/1M output from the owner pricing model, +/-20% range
+- Real `claude-opus-4-7` drafts: `memory-optimised.md` 20,676 -> 215 tokens,
+  `context-optimised.md` 15,766 -> 244 tokens
+- Exports: full PDF (<= 40 pages), redacted PDF (<= 25 pages), CSV one row per issue, drafts zip,
+  handoff zip with all five required files, HTML print fallbacks, and a redaction proof showing
+  zero real paths leaked while aggregates are preserved
+
+Engine lives at `/app/backend/core/`: `config.py`, `importer.py`, `classifier.py`, `similarity.py`,
+`analyzer.py`, `drafts.py`, `exports.py`, `report.py`.
+
+### Scoring finding worth remembering
+The specified penalty caps alone put a floor of about 72 on the overall score, which makes the
+`Wasteful` and `Critical` verdicts unreachable. A second, clearly labelled tier of severity-scaling
+deductions was added so all four verdicts are reachable. Both tiers are itemised in the score
+ledger and explained in the assumptions block.
+
+---
+
+## Phase 2 — Full app build — COMPLETE
+
+### Backend (`/app/backend`)
+`server.py` (API), `scanner.py` (7-stage background pipeline, on-demand drafting, retention),
+`seed.py` (20 demo scans generated through the real analyzer), `settings_store.py`, `db.py`.
+
+Endpoints: health/config/me/stats, scan create (multipart, all four sources), scan read, results,
+files (paged + grouped), delete, on-demand draft, five export types, printable HTML views, export
+preview, handoff package, settings read/write/reset, LLM-assisted rate refresh, admin seed and
+retention.
+
+### Frontend (`/app/frontend/src`)
+Eight surfaces: landing, new scan, progress, results dashboard, exports, VS Code handoff, history,
+settings. All states handled: queued, running with the seven named stages, completed,
+`ImportFailed`, `ParseFailed`, `InsufficientData`, partial-scan warning, empty history, zero-issue
+Lean result, export failure fallbacks, expired-content draft errors.
+
+### Design
+The user-supplied **DRL Brand Colors & Design System v2.1** supersedes the earlier internal design
+brief. Implemented in `index.css`: full token set, DRL Purple primary with gradient CTAs and the
+Navy-to-Purple navbar, Inter typography and type scale, 8px spacing grid, radius/shadow/z-index/
+motion tokens, semantic tone tokens with dark-mode equivalents, Light/Dark/Auto toggle, reduced
+motion, and A4 print styles.
+
+### Testing
+- Iteration 1 (backend + frontend): 28/31, no critical bugs.
+- Iteration 2 (frontend interactions): 16/16 feature areas passed.
+- Fixed from the reports: draft over-compression (minimum length relative to source, one retry,
+  quality warning), theme toggle visibility at small widths, mobile horizontal overflow caused by
+  grid items defaulting to `min-width: auto`.
+- Bitbucket end-to-end path verified through the API after testing (238 files imported, correct
+  `InsufficientData` outcome, all seven stages tracked).
+
+---
+
+## Phase 3 — Optional next steps (not started)
+
+1. Private repository support via a stored, encrypted token (currently out of scope).
+2. Scan-to-scan comparison so a user can prove an improvement after applying the drafts.
+3. Richer duplicate evidence: inline diff between the members of a duplicate cluster.
+4. Batch draft generation with a progress indicator for all 25 eligible files.
+5. Saved assumption profiles, for example one per model vendor.
+6. Regression fixtures pinning penalty-cap arithmetic and partial-scan maths.
+
+---
+
+## Phase 4 — Repository series, run history and archive (Status: COMPLETED)
+
+### Data model
+`repo_series` is a new collection. A series is keyed on `source_type + owner + repo_name + branch`,
+so `main` and `develop` on the same repository are two independent rows. Zip and markdown uploads
+have no owner or branch, so they key on the uploaded file name: uploading `myday-2.0.zip` twice
+appends a second run instead of creating a second row.
+
+Every scan is now a *run* on a series. `scans` gained `series_id`, `series_key`, `run_number`,
+`previous_score` and `score_delta`. `series.py` owns the logic: `attach_scan` binds a run (and
+moves it if the branch is only resolved after the import), `recompute_series` renumbers runs and
+refreshes the rolled-up columns, and `backfill` is the idempotent migration.
+
+The migration ran on startup and attached all 24 pre-existing scans to 24 series, 20 of them the
+seeded demo series which start archived. `/api/scans/{id}` and every export link are unchanged.
+
+The old "keep only the last 10 real scans" pruning rule was removed. Content retention (7 days)
+and metadata retention (30 days) are unchanged.
+
+### API
+`GET /api/series`, `GET /api/series/{id}`, `PATCH /api/series/{id}/archive`,
+`DELETE /api/series/{id}` (deletes the series and all of its runs), `POST /api/series/backfill`
+and `GET /api/series/export/archive`. The archive export is a zip holding the full PDF and
+findings CSV for the latest completed run of every archived series, plus `manifest.csv`,
+`README.txt` and `generated-at.txt`.
+
+### History page
+One row per repository: latest score, verdict, run count, delta versus the previous run and the
+last run time. Expanding a row lists every run with its own score, delta and verdict. Search by
+repository, owner or branch, and five sort orders. Archiving is per series, with the archive in a
+collapsible section that carries the bundle download. Deleting works at both levels: a single run,
+or the whole repository.
+
+### Validation
+`myday-2.0.zip` was uploaded twice. Both runs landed on one series (`myday-2.0`, 2 runs) rather
+than two history rows. To prove the delta arithmetic rather than just the append, run 2 used a
+variant with 12 duplicated agent files: score moved 79 -> 55, verdict Watchlist -> Wasteful,
+delta -24.
+
+### Bug found and fixed during validation
+`_walk_repository` excluded any directory starting with `.git`, which silently swallowed
+`.github/`. That is where `copilot-instructions.md`, `agents/*.agent.md` and `prompts/*.prompt.md`
+live, so the 24 agent files in the user's own repository were invisible and it scored a misleading
+100 / Lean. Only the literal `.git` object store is dropped now. The same repository scans as
+82 files / 79 / Watchlist. `test_core.py` still passes 59/59.
+
+### Two further fixes from validation
+1. Markdown uploads all carried the fixed name `markdown-upload`, so every unrelated `.md` batch
+   collapsed into one series. The series name now comes from the uploaded file set (single file
+   name, or `first +N more (hash)`), so re-uploading the same set appends a run while a different
+   set starts its own series. Verified both ways.
+2. `backend_test.py` counted raw CSV lines, which over-reports records because evidence fields
+   contain quoted newlines (41 issues read as 103 rows). It now uses `csv.DictReader`.
+
+### Known non-code issue
+`test_core.py` is at 56/59: the three failures are all LLM draft checks and the provider reports
+"Budget has been exceeded! Current cost 42.48, max budget 41.0". The Universal Key needs a top-up
+(Profile > Universal Key > Add Balance), or a personal Anthropic/Gemini key in Settings. The app
+already surfaces this as an HTTP 402 with a plain-language message; nothing else is affected.
+
+---
+
+## Health check pass (post-Phase 4)
+
+All green, with two real bugs found and fixed during the sweep.
+
+| Check | Result |
+| --- | --- |
+| Services (backend, frontend, mongodb) | RUNNING |
+| API endpoints via the public URL | 13/13 return 200, including all five exports, print, export-preview, handoff and the archive bundle |
+| Series data integrity | CLEAN: 26 scans, 0 orphans, 25 series, run numbers contiguous, every `score_delta` and `previous_score` recomputed and verified, no orphaned child documents, series keys unique |
+| Frontend routes | 7/7 render, no console errors |
+| `test_core.py` | 59/59 |
+| Frontend compile (esbuild) | clean |
+| LLM draft generation | working again (the budget block has cleared); a fresh draft was written by `anthropic/claude-opus-4-7` |
+| Deployment readiness | pass |
+
+### Bug 1 — duplicate draft IDs (real, user-visible)
+On-demand drafting numbered new drafts `count + 1`. A failed auto-draft leaves a gap in the
+sequence, so that expression could return an id that was already taken: two drafts ended up sharing
+`DRF-SCN-2026-07-29-0006-005`. Because the drafts tab strip keys on the draft id, the duplicate broke
+React reconciliation (a console error) and would have made those two tabs impossible to tell apart.
+
+Fixed at the root: `db.next_draft_id()` picks the lowest genuinely free id and is now used by both
+the auto and on-demand paths; on-demand deletes the previous draft for that file *before* choosing an
+id. Added a unique index on `drafts.id` (created in a try/except so legacy data cannot block
+startup), repaired the one bad record, and switched the tab strip to key on `source_path`, which is
+unique per scan by construction. Verified: a new on-demand draft correctly filled the free slot 003,
+tab switching works, and the results page reports zero console errors.
+
+### Bug 2 — `.gitignore` excluded the `.env` files
+Flagged by the deployment check as a blocker: the deployment bundle needs them. The patterns were
+removed. Note the trade-off — if you sync to GitHub, `backend/.env` now carries the Mongo URL and the
+Universal LLM key, so either keep that repository private or strip the file before pushing.
+
+---
+
+## Deployment readiness verdict
+
+**Deployment agent: PASS, zero findings.** Env vars read from the environment in both tiers, no
+hardcoded URLs or secrets, backend on `0.0.0.0:8001`, every route under `/api`, CORS from
+`CORS_ORIGINS`, MongoDB only, supervisor config valid, no ignore-file blockers, queries use
+projections and limits, and neither the startup series migration nor the new index creation blocks
+startup (both are wrapped so failures are logged rather than fatal).
+
+**Testing agent iteration 8: 26/26 backend, frontend clean, no regressions.** Both bug fixes from the
+health sweep were verified independently rather than by my own inspection:
+- draft ids are unique across the database; generating a new draft picks a free id; regenerating an
+  existing file replaces its draft without creating a duplicate;
+- the drafts tab strip renders 7 tabs and switches between them with no React key warnings;
+- markdown series naming groups an identical file set and separates a different one;
+- the series model, all eight export endpoints, the archive bundle, the archive toggle, CSV
+  well-formedness and every page still behave.
+
+Database state after testing: 26 scans, 25 series (20 archived), 22 drafts all uniquely identified,
+zero orphans, `myday-2.0` still at 2 runs with a -24 delta. The testing agent removed its own
+fixtures and changed no application code.
+
+### One known limitation to be aware of, not a blocker
+Deployment runs 2 replicas, and `scans.workspace_dir` points at imported repository content on the
+replica's local disk. Scoring, history, exports and archive bundles all read from MongoDB and are
+unaffected. Only *on-demand* draft generation reads the original file from disk, so a draft request
+routed to the replica that did not run the scan will report "the imported repository content has
+expired, re-run the scan" even though the 7 day window is still open. The user-facing behaviour is a
+clear message rather than an error, so this is a graceful degradation. Proper fixes, for a later
+phase: put imported content in object storage, or store the source text of the draft candidates in
+Mongo at scan time (they are capped at 25 files, so the cost is small).
+
+---
+
+## Code review response
+
+### Critical: undefined variables (both fixed)
+`server.py` archive export and `write_settings` assigned inside a `try` whose `except` always
+raises, so neither could actually be unbound. Both were restructured anyway so static analysis can
+see it: the archive export now returns inside the `try`, and the bare `updated: dict` annotation
+was removed.
+
+### Anti-pattern: `is` versus `==` (not applied, all 18 are false positives)
+Every one of the 18 flagged lines across `settings_store.py`, `server.py`, `series.py`, `seed.py`,
+`db.py`, `core/importer.py`, `core/exports.py` and `core/config.py` is a singleton comparison:
+`is None`, `is not None`, or `doc.tzinfo is None`. Not one compares a string or numeric literal.
+The review's own rule says to keep `is` for singletons, so changing these to `==` would have been
+wrong: `!= None` is both non-idiomatic and unsafe for any object overriding `__eq__`. Verified by
+grepping every ` is ` and ` is not ` occurrence in those eight files.
+
+### Complexity (all six refactored, with proof of no behaviour change)
+| Function | Before | After |
+| --- | --- | --- |
+| `analyzer.analyze` | CC 88, 521 lines, 83 locals | **CC 10, ~45 lines** |
+| `exports._common_sections` | CC 57, 204 lines | **CC 2** (12 section functions) |
+| `drafts.select_draft_targets` | CC 25 | **CC 4** |
+| `exports.efficiency_summary_md` | CC 18 | **CC 4** |
+| `classifier.inventory_from_entries` | CC 15 | **CC 4** |
+| `drafts.generate_draft` | CC 14, 81 lines | **CC 4** |
+
+`analyze()` is now a pipeline: `_group_files` -> `_detect_all` -> `_tier1_penalties` ->
+`_compute_metrics` -> `_collect_issues` (eight `_find_*` builders behind a `FINDING_BUILDERS`
+tuple, so issue ids stay in order) -> assembly helpers (`_build_savings`,
+`_build_category_scores`, `_build_top_drivers`, `_build_actions`, `_build_penalty_ledger`,
+`_build_assumptions_block`, `_build_detections`). Shared state moved into the `_Groups`,
+`_Detections`, `_Tier1`, `_Metrics` and `_Findings` dataclasses; the `add_issue` and `to_credits`
+closures became the `_IssueLog` and `_Money` classes. `_common_sections` became one function per
+report section driven by a `PDF_SECTIONS` tuple, with redaction folded into a `_Ctx` helper so the
+`redact_text(...) if redacted else ...` ternary is not repeated eleven times.
+
+The delicate heuristic arithmetic that the previous agent flagged as risky was preserved exactly.
+
+### How the refactor was made safe
+`/app/tests/golden_snapshot.py` records a behavioural fingerprint over five fixtures (one per
+verdict band plus a markdown-only case), built in memory from the deterministic seed generator so
+it needs no network or database. It captures the entire `analyze()` dict (scores, verdict, every
+issue, penalty ledger, detections, savings, clusters, drivers, actions), the file inventory, the
+draft targets, the plain and redacted findings CSVs, the efficiency summary markdown, the handoff
+prompt, and a structural fingerprint of the reportlab PDF story taken by walking the flowables and
+reading paragraph text and table cells, which checks PDF content without being disturbed by
+embedded timestamps.
+
+    python tests/golden_snapshot.py --write   # before refactoring
+    python tests/golden_snapshot.py --check   # after
+
+The harness was mutation-tested first: a one-word change to an export was detected, so it is not
+blind. It reported IDENTICAL after every single refactor step. `test_core.py` stayed at 59/59.
+
+### Remaining C-grade functions, deliberately left alone
+`detect_architecture` (13), `_build_duplicate_clusters` (13), `detect_repeated_blocks` (12),
+`detect_review_stages` (11) and `print_view_html` (13) were not in the review and are cohesive
+single-purpose detectors. `_group_files` (15) and `_sec_skipped` (12) are new but linear; radon
+counts each list comprehension as a branch, which inflates them.
+
+---
+
+## User-reported 403 on scanning in preview
+
+**Scanning does work in preview.** Reproduced the full flow rather than assuming: `POST /api/scans`
+returned 200 for both zip and GitHub, a zip scan driven through the browser UI completed to
+82 files / 79 / Watchlist, a GitHub scan of `humanlayer/12-factor-agents` completed, and a sweep of
+every app and API route returned 200 with no 403 anywhere. The testing agent independently confirmed
+both scan flows complete in preview with no 403.
+
+The one failing request in the browser is `POST /cdn-cgi/rum`, Cloudflare's monitoring beacon
+injected by the preview proxy. It is not ours, it always aborts, and it has no effect on the app.
+
+**What the 403 almost certainly was:** GitHub allows 60 unauthenticated API requests per hour per IP
+and the preview container shares its IP, so a burst of GitHub scans exhausts it and GitHub replies
+403. That is GitHub throttling, not the preview environment blocking the app.
+
+**Bug found while investigating.** A 403 that was not recognised as throttling fell through to
+`GitHubRepoUnavailable: "GitHub returned HTTP 403"`, which wrongly implies the repository does not
+exist when the real cause is usually a temporary throttle or a private repository. Fixed in
+`core/importer.py`:
+- `_is_rate_limited` now also treats a 403 as throttling when `Retry-After` is present (GitHub's
+  *secondary* rate limit keeps `x-ratelimit-remaining` above zero, so the old check missed it) or
+  when the body mentions abuse detection.
+- A genuine access-denied 403 raises the new `GitHubAccessDenied` with an actionable message
+  covering private/blocked repositories, the 60-per-hour limit, adding a token in Settings, or
+  uploading a zip. Bitbucket's 403 and 404 were also separated (`BitbucketAccessDenied`).
+- Both codes registered in `scanner.IMPORT_ERROR_CODES` and given help text in `format.js`.
+
+Verified by a truth table over the classifier (429, 403 quota exhausted, 403 secondary limit, 403
+abuse detection, 403 rate-limit body all throttle; 403 private repo, 404 and 200 do not) and by
+confirming a non-existent repo still reports the 404 path. Testing agent iteration 9: 100% pass,
+no critical bugs, 26/26 API tests, 14/14 unit tests, golden snapshot IDENTICAL.
+
+**Recommendation for the user:** add a GitHub personal access token in Settings. It lifts the limit
+from 60 to 5,000 requests per hour and makes GitHub scanning reliable.
+
+---
+
+## Deployment failure fixed: unprefixed /health probe
+
+The deployment logs were flooded with `127.0.0.1 - "GET /health HTTP/1.0" 404 Not Found` every one to
+two seconds. The container's liveness/readiness probe calls the **unprefixed** `/health` directly on
+the backend on loopback, but every route in this app sits on an `APIRouter(prefix="/api")`, so only
+`/api/health` existed. The probe therefore never succeeded and the deployment never went healthy.
+
+Fix in `server.py`, registered on the FastAPI app itself rather than the router, after
+`app.include_router(api)`:
+
+    @app.get("/health")
+    @app.get("/healthz")
+    async def container_health():
+        return {"status": "ok"}
+
+`/health`, `/healthz` and the original `/api/health` all return 200. Deployment agent re-run:
+**PASS, zero findings**, including the Atlas-specific checks (startup index creation, the
+`series.backfill()` migration and the retention loop are all safe against Atlas and cannot block
+startup past the probe deadline).
+
+Note on the testing agent's "critical" flag: it observed that the *public* URL `/health` returns the
+frontend HTML, because the ingress sends everything that is not `/api/*` to the frontend. That is by
+design and irrelevant here: the probe in the logs originates from `127.0.0.1` against the backend
+container directly, which is exactly the path that now returns 200. No ingress change is needed, and
+infrastructure is out of scope anyway.
+
+## Bitbucket "validation error" - not a private repo problem
+
+The frontend regexes in `format.js` only accepted a bare `https://bitbucket.org/workspace/repo`,
+while the backend parsers in `core/importer.py` had always accepted richer forms. A URL copied from
+the browser normally looks like `https://bitbucket.org/team/repo/src/main/`, so the client rejected
+it **before any network request was made** - which is why it looked like an access problem but was
+not. Public versus private was never involved.
+
+`GITHUB_RE` and `BITBUCKET_RE` now mirror the backend patterns exactly: optional `www.`, `http` or
+`https`, an optional `.git` suffix, and an optional `/tree/<branch>` or `/src/<branch>` segment.
+`/api/config` advertises the relaxed patterns too. Verified with a 12-URL backend/frontend parity
+table plus 13 in-browser validation cases, and end to end:
+`https://bitbucket.org/tildeslash/monit/src/master/` is now accepted with `branch` correctly
+extracted as `master`.
+
+Testing agent iteration 10: URL validation 13/13, end-to-end scans 100%, regressions 100%,
+`test_core.py` 59/59, golden snapshot IDENTICAL.

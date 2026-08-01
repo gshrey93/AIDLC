@@ -24,7 +24,10 @@ from settings_store import get_settings
 
 log = logging.getLogger("bloatguardian.seed")
 
-SEED_WORKSPACE = os.environ.get("BG_SEED_WORKSPACE", "/tmp/bloatguardian/seed")
+SEED_WORKSPACE = os.environ.get(
+    "BG_SEED_WORKSPACE",
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "poc_out", "seed")),
+)
 
 BAND_TARGETS = {
     "Lean": (83, 94),

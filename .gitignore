@@ -83,3 +83,8 @@ android-sdk/
 credentials.json
 *.key
 .credentials
+
+# Generated test outputs & reports
+poc_out/
+test_reports/
+

@@ -26,6 +26,21 @@ import {
 } from "@/components/ui/select";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import DonutChart from "@/components/DonutChart";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+
+const ActionTooltip = ({ content, children }) => {
+  if (!content) return children;
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip>
+        <TooltipTrigger asChild>{children}</TooltipTrigger>
+        <TooltipContent side="top" className="z-50 bg-popover text-popover-foreground border border-border shadow-md px-2.5 py-1 text-xs font-medium">
+          {content}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+};
 import {
   AlertDialog,
   AlertDialogAction,
@@ -249,41 +264,50 @@ export default function History() {
                     </TableCell>
                     <TableCell>
                       <div className="flex justify-end gap-1">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-8 w-8"
-                          aria-label="Open run"
-                          onClick={() => navigate(scanPath(run))}
-                          data-testid="run-open-button"
-                        >
-                          <ExternalLink className="h-4 w-4" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-8 w-8"
-                          aria-label="Download run report"
-                          disabled={run.status !== "completed" || busy === run.id}
-                          onClick={() => downloadReport(run)}
-                          data-testid="run-download-button"
-                        >
-                          {busy === run.id ? (
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                          ) : (
-                            <Download className="h-4 w-4" />
-                          )}
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-8 w-8 text-destructive"
-                          aria-label="Delete run"
-                          onClick={() => setPendingDelete({ kind: "run", run, series })}
-                          data-testid="run-delete-button"
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
+                        <ActionTooltip content="Open scan results">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8"
+                            title="Open scan results"
+                            aria-label="Open run"
+                            onClick={() => navigate(scanPath(run))}
+                            data-testid="run-open-button"
+                          >
+                            <ExternalLink className="h-4 w-4" />
+                          </Button>
+                        </ActionTooltip>
+                        <ActionTooltip content={busy === run.id ? "Building PDF report..." : "Download PDF report"}>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8"
+                            title="Download PDF report"
+                            aria-label="Download run report"
+                            disabled={run.status !== "completed" || busy === run.id}
+                            onClick={() => downloadReport(run)}
+                            data-testid="run-download-button"
+                          >
+                            {busy === run.id ? (
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <Download className="h-4 w-4" />
+                            )}
+                          </Button>
+                        </ActionTooltip>
+                        <ActionTooltip content="Delete scan run">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-destructive hover:bg-destructive/10"
+                            title="Delete scan run"
+                            aria-label="Delete run"
+                            onClick={() => setPendingDelete({ kind: "run", run, series })}
+                            data-testid="run-delete-button"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </ActionTooltip>
                       </div>
                     </TableCell>
                   </TableRow>
@@ -405,64 +429,86 @@ export default function History() {
                   </TableCell>
                   <TableCell>
                     <div className="flex justify-end gap-1">
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8"
-                        aria-label="Open latest run"
-                        disabled={!latestRun}
-                        onClick={() => latestRun && navigate(scanPath(latestRun))}
-                        data-testid="series-open-button"
-                      >
-                        <ExternalLink className="h-4 w-4" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8"
-                        aria-label="Download latest report"
-                        disabled={!s.latest_completed_scan_id || busy === s.latest_completed_scan_id}
-                        onClick={() =>
-                          downloadReport(
-                            (s.runs || []).find((r) => r.id === s.latest_completed_scan_id) ||
-                              latestRun,
-                          )
+                      <ActionTooltip content={latestRun ? "View latest scan results" : "No scan results available"}>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8"
+                          title={latestRun ? "View latest scan results" : "No scan results available"}
+                          aria-label="Open latest run"
+                          disabled={!latestRun}
+                          onClick={() => latestRun && navigate(scanPath(latestRun))}
+                          data-testid="series-open-button"
+                        >
+                          <ExternalLink className="h-4 w-4" />
+                        </Button>
+                      </ActionTooltip>
+                      <ActionTooltip
+                        content={
+                          busy === s.latest_completed_scan_id
+                            ? "Building PDF report..."
+                            : s.latest_completed_scan_id
+                              ? "Download latest PDF report"
+                              : "No report available"
                         }
-                        data-testid="series-download-button"
                       >
-                        {busy === s.latest_completed_scan_id ? (
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                        ) : (
-                          <Download className="h-4 w-4" />
-                        )}
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8"
-                        aria-label={s.archived ? "Restore from archive" : "Archive repository"}
-                        disabled={busy === s.id}
-                        onClick={() => setArchived(s, !s.archived)}
-                        data-testid={s.archived ? "series-unarchive-button" : "series-archive-button"}
-                      >
-                        {busy === s.id ? (
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                        ) : s.archived ? (
-                          <ArchiveRestore className="h-4 w-4" />
-                        ) : (
-                          <Archive className="h-4 w-4" />
-                        )}
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8 text-destructive"
-                        aria-label="Delete repository and all runs"
-                        onClick={() => setPendingDelete({ kind: "series", series: s })}
-                        data-testid="series-delete-button"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8"
+                          title={
+                            s.latest_completed_scan_id ? "Download latest PDF report" : "No report available"
+                          }
+                          aria-label="Download latest report"
+                          disabled={!s.latest_completed_scan_id || busy === s.latest_completed_scan_id}
+                          onClick={() =>
+                            downloadReport(
+                              (s.runs || []).find((r) => r.id === s.latest_completed_scan_id) ||
+                                latestRun,
+                            )
+                          }
+                          data-testid="series-download-button"
+                        >
+                          {busy === s.latest_completed_scan_id ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Download className="h-4 w-4" />
+                          )}
+                        </Button>
+                      </ActionTooltip>
+                      <ActionTooltip content={s.archived ? "Restore repository from archive" : "Archive repository"}>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8"
+                          title={s.archived ? "Restore repository from archive" : "Archive repository"}
+                          aria-label={s.archived ? "Restore from archive" : "Archive repository"}
+                          disabled={busy === s.id}
+                          onClick={() => setArchived(s, !s.archived)}
+                          data-testid={s.archived ? "series-unarchive-button" : "series-archive-button"}
+                        >
+                          {busy === s.id ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : s.archived ? (
+                            <ArchiveRestore className="h-4 w-4" />
+                          ) : (
+                            <Archive className="h-4 w-4" />
+                          )}
+                        </Button>
+                      </ActionTooltip>
+                      <ActionTooltip content="Delete repository and all runs">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8 text-destructive hover:bg-destructive/10"
+                          title="Delete repository and all runs"
+                          aria-label="Delete repository and all runs"
+                          onClick={() => setPendingDelete({ kind: "series", series: s })}
+                          data-testid="series-delete-button"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </ActionTooltip>
                     </div>
                   </TableCell>
                 </TableRow>,

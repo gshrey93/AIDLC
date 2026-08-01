@@ -271,6 +271,7 @@ export const IssuesTable = ({ issues }) => {
                         variant="ghost"
                         size="icon"
                         className="h-8 w-8"
+                        title="View issue details and evidence"
                         aria-label="View evidence"
                         onClick={() => setActive(issue)}
                         data-testid="issues-row-view-evidence-button"
@@ -281,6 +282,7 @@ export const IssuesTable = ({ issues }) => {
                         variant="ghost"
                         size="icon"
                         className="h-8 w-8"
+                        title="Copy recommendation"
                         aria-label="Copy recommendation"
                         onClick={() => copyRecommendation(issue)}
                         data-testid="issues-row-copy-recommendation-button"

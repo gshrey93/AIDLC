@@ -23,11 +23,12 @@ import traceback
 import zipfile
 from datetime import datetime, timezone
 
-sys.path.insert(0, "/app/backend")
+BACKEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "backend"))
+sys.path.insert(0, BACKEND_DIR)
 
-from dotenv import load_dotenv  # noqa: E402
+from dotenv import load_dotenv
 
-load_dotenv("/app/backend/.env")
+load_dotenv(os.path.join(BACKEND_DIR, ".env"))
 
 from core import config, importer  # noqa: E402
 from core.analyzer import analyze  # noqa: E402
@@ -38,7 +39,7 @@ from core.exports import (  # noqa: E402
 )
 from core.report import build_payload  # noqa: E402
 
-OUT = "/app/poc_out"
+OUT = os.path.abspath(os.path.join(os.path.dirname(__file__), "poc_out"))
 RESULTS: list = []
 
 
